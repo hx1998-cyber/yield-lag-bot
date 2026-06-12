@@ -3,40 +3,33 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "baccarat"
+name = "yield-lag-bot"
 version = "0.1.0"
-description = "Polymarket automated trading bot — copy-trading & merge-redeem arbitrage on Polygon"
+description = "Project YIELD-LAG: CME Treasury futures and crypto perpetual lead-lag research"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
-authors = [{ name = "baccarat" }]
+authors = [{ name = "yield-lag-bot" }]
 
 dependencies = [
-    # async core
     "uvloop>=0.19.0; sys_platform != 'win32'",
-    # config
     "pydantic>=2.6,<3",
     "pydantic-settings>=2.2",
     "PyYAML>=6.0.1",
-    # logging
     "structlog>=24.1",
     "orjson>=3.9",
-    # storage
     "SQLAlchemy[asyncio]>=2.0.29",
     "asyncpg>=0.29",
     "alembic>=1.13",
     "redis[hiredis]>=5.0.3",
-    # web3 / chain
     "web3>=6.15",
     "eth-account>=0.11",
     "eth-abi>=5.0",
-    # network
     "aiohttp>=3.9",
     "websockets>=12.0",
     "tenacity>=8.2",
-    # telegram
+    "pandas>=2.0",
     "aiogram>=3.4",
-    # numerics — Polymarket prices/sizes use Decimal exclusively, never float
 ]
 
 [project.optional-dependencies]
@@ -52,14 +45,12 @@ dev = [
 ]
 
 [project.scripts]
+yield-lag-bot = "yield_lag_bot.app:run"
 baccarat = "baccarat.app:run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/baccarat"]
+packages = ["src/yield_lag_bot", "src/baccarat"]
 
-# ---------------------------------------------------------------------------
-# Ruff: lint + format
-# ---------------------------------------------------------------------------
 [tool.ruff]
 target-version = "py311"
 line-length = 100
@@ -67,27 +58,26 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = [
-    "E", "F", "W",   # pycodestyle / pyflakes
-    "I",             # isort
-    "UP",            # pyupgrade
-    "B",             # bugbear
-    "ASYNC",         # async best-practices
-    "SIM",           # simplify
-    "RUF",           # ruff-specific
+    "E",
+    "F",
+    "W",
+    "I",
+    "UP",
+    "B",
+    "ASYNC",
+    "SIM",
+    "RUF",
 ]
 ignore = [
-    "E501",  # line length handled by formatter
+    "E501",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B", "SIM"]
 
-# ---------------------------------------------------------------------------
-# pytest
-# ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = [
     "-ra",
     "--strict-markers",
@@ -98,9 +88,6 @@ markers = [
     "slow: long-running tests",
 ]
 
-# ---------------------------------------------------------------------------
-# mypy
-# ---------------------------------------------------------------------------
 [tool.mypy]
 python_version = "3.11"
 strict = true

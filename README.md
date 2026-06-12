@@ -1,104 +1,121 @@
-# baccarat
+# Project YIELD-LAG
 
-Polymarket automated trading bot — **copy-trading** & **merge-redeem arbitrage** on Polygon.
+Project YIELD-LAG is a research system for studying lead-lag relationships between CME U.S. Treasury futures and crypto perpetual futures.
 
-> Single-instance, fully-async (`asyncio`) Python bot. Postgres is the source of
-> truth, Redis is the performance view, all inter-module communication uses
-> `asyncio.Queue`. Designed to be easy to operate and easy to debug — every
-> signal carries a `trace_id` that propagates across logs from ingestion to
-> on-chain settlement.
+The initial hypothesis space is macro and rates shocks from Treasury futures (`ZT`, `ZF`, `ZN`, `TN`) against liquid crypto perpetuals (`BTCUSDT`, `ETHUSDT`). This is not risk-free arbitrage. M1 is data collection, latency measurement, and research plumbing only.
 
-## Status
+## M1 Scope
 
-**M1 — Architecture Initialization (current).**
-This milestone delivers project skeleton, infra, DB schema, base classes,
-config & logging. Business logic lands in M2 onward. See `docs/` (TBD) for
-milestone definitions.
+- Normalized `MarketEvent` model.
+- Binance USD-M Futures public WebSocket adapter.
+- Bybit v5 public WebSocket adapter.
+- Hyperliquid public WebSocket adapter for trades and BBO.
+- CME and Databento historical adapter stubs.
+- Postgres schema for `market_ticks`, `latency_stats`, `signals`, and `paper_orders`.
+- Latency calculation and stale data guard.
+- Lead-lag analyzer for aligned window and forward-return reports.
+- Paper-only execution boundary. `LIVE_TRADING=false` by default.
 
-## Project layout
+No live order placement, real API keys, CME execution, or paid-data assumptions are included in M1.
 
+## Layout
+
+```text
+src/yield_lag_bot/
+  models/       normalized event model
+  data/         public adapters, normalizer, recorder, CME/Databento stubs
+  research/     latency and lead-lag analysis
+  strategy/     M2 signal skeletons
+  execution/    paper executor and live executor stubs
+  risk/         stale data guard and safety shells
+  jobs/         collection and research entrypoints
+  dashboard/    monitoring placeholder
 ```
-src/baccarat/
-├── core/         # config, logger, exceptions, common dataclasses, trace_id
-├── ingestion/    # market data (Polymarket WS) + chain listener (Polygon RPC)
-├── strategy/     # CopyTrade + Arbitrage (Maker-Taker state machine)
-├── execution/    # wallet, gas, tx builder/submitter, position manager
-├── risk/         # hard-limit risk manager (size / drawdown / rate)
-├── monitoring/   # Telegram alerts + metrics
-├── storage/      # SQLAlchemy models + Postgres + Redis clients
-└── app.py        # asyncio orchestrator — wires queues + tasks
+
+The legacy `src/baccarat` package is kept as compatibility skeleton for the existing Docker/Postgres/Redis/Python structure while Project YIELD-LAG modules live under `src/yield_lag_bot`.
+
+## Safety Defaults
+
+```env
+YIELD_LAG_LIVE_TRADING=false
+YIELD_LAG_PAPER_TRADING=true
+YIELD_LAG_MAX_ORDER_USD=10
+YIELD_LAG_MAX_POSITION_USD=50
+YIELD_LAG_MAX_DAILY_LOSS_USD=20
+YIELD_LAG_MAX_LATENCY_MS=300
+YIELD_LAG_STALE_DATA_MS=500
+YIELD_LAG_KILL_SWITCH_ON_ERROR=true
 ```
 
-## Quick start (development)
+## Run Locally
 
-Requires Docker, Docker Compose and Python 3.11+.
+Install development dependencies:
 
 ```bash
-# 1. Copy templates and fill in secrets
-cp config/settings.example.yaml config/settings.yaml
-cp .env.example .env
-# Edit .env: PRIVATE_KEY, RPC_URLS, TELEGRAM_BOT_TOKEN, POSTGRES_PASSWORD
-
-# 2. Bring up infra + bot
-docker compose -f docker/docker-compose.yml up --build
-
-# 3. Run DB migrations (one-shot)
-docker compose -f docker/docker-compose.yml run --rm bot alembic upgrade head
-```
-
-For local dev without containers:
-
-```bash
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-# Bring up only redis + postgres in Docker:
-docker compose -f docker/docker-compose.yml up -d redis postgres
+```
+
+Run tests:
+
+```bash
+pytest
+```
+
+Start Postgres, Redis, and the M1 app:
+
+```bash
+docker compose -f docker/docker-compose.yml up --build
+```
+
+Run migrations after services are up:
+
+```bash
 alembic upgrade head
-python -m baccarat.app
 ```
 
-## Architecture summary
+Collect public Binance book-ticker events:
 
-```
-Polymarket WS ─┐                      ┌─► Strategy (Arb / Copy) ─► Risk ─► Executor ─► CLOB / Polygon
-               ├─► asyncio.Queue ─────┤                               │
-Polygon RPC  ──┘                      └─► Redis (orderbook, position) ┘
-                                              │
-                                              └─► Postgres (truth)
+```bash
+python -m yield_lag_bot.jobs.collect_market_data
 ```
 
-- **Single event loop** orchestrates all I/O. No thread pools, no inter-process locks.
-- **Maker-Taker arbitrage** — never submits both legs in parallel. The thin leg
-  is placed as a Maker; the thick leg fires only after `OrderFilled` confirmation.
-  A hard hedge fallback unwinds any naked exposure; if the hedge itself fails,
-  the strategy halts and pages an operator via Telegram.
-- **Risk manager** reads positions from a Redis mirror (μs reads) and writes
-  to Postgres asynchronously (fault-tolerant truth).
-- **Trace ID** — every `Signal.id` is set as a contextvar at strategy entry
-  and is included in every structlog event downstream. One `grep` reconstructs
-  the full lifecycle.
+Collect 10 minutes of Hyperliquid public trades and BBO:
 
-## Configuration
+```bash
+python -m yield_lag_bot.jobs.collect_market_data --venue hyperliquid --symbols BTC,ETH --duration 600
+```
 
-- Non-sensitive defaults live in `config/settings.yaml` (see `settings.example.yaml`).
-- Secrets live only in `.env` (private key, RPC URLs, DB passwords, Telegram token).
-- Both are merged by `baccarat.core.config.Settings` (Pydantic Settings).
+Export Hyperliquid ticks:
 
-## Conventions
+```bash
+python -m yield_lag_bot.jobs.export_ticks --venue hyperliquid --symbols BTC,ETH --out ticks.csv
+```
 
-- All money/price values are `decimal.Decimal`. **Never use `float`** for prices,
-  sizes, or PnL — even one stray float can corrupt downstream rounding.
-- All times are UTC, expressed as `int` epoch ms in transit and `TIMESTAMPTZ`
-  at rest.
-- Async-only API — every public function on every base class is `async def`.
+Run a research report from a CSV of normalized ticks:
 
-## Roadmap
+```bash
+python -m yield_lag_bot.jobs.run_research ticks.csv lead_lag_report.csv --cme-symbol ZN --crypto-symbol BTCUSDT
+```
 
-- **M1** — Architecture init (this milestone).
-- **M2** — Polymarket CLOB WS subscription + Polygon listener wiring.
-- **M3** — CopyTrade & Arbitrage strategies + unit tests (incl. slippage edge cases).
-- **M4** — Live trading: USDC approve / buy / sell / merge-redeem on Polygon mainnet.
+Replay saved ticks through the analyzer path:
+
+```bash
+python -m yield_lag_bot.jobs.replay_market_data ticks.csv --out lead_lag_report.csv --cme-symbol ZN --crypto-symbol BTC
+```
+
+The CSV must include `symbol`, `receive_ts`, and either `mid_price` or `bid_price` plus `ask_price`.
+
+## Remaining M2 Work
+
+- Persist live public WebSocket events continuously into Postgres.
+- Integrate CME CSV/history with Hyperliquid exports into a unified research dataset.
+- Add Databento integration behind optional credentials.
+- Build richer event studies around scheduled macro releases and rates shocks.
+- Add signal generation, paper trading loop, fee/slippage calibration, and dashboard views.
+- Expand operational monitoring for stale streams, reconnects, and latency alerts.
 
 ## License
 
-Proprietary — internal use only.
+Proprietary, internal use only.

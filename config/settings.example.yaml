@@ -1,86 +1,29 @@
-# baccarat — non-sensitive configuration.
-# Copy to `settings.yaml` and edit. Secrets (private key, RPC URLs, DB password,
-# Telegram token) belong in `.env` and override these values at runtime.
-#
-# Anything you put here can be overridden by an env var prefixed with
-# BACCARAT_, using `__` as the nested separator. e.g.
-#   BACCARAT_RISK__MAX_POSITION_SIZE_USDC=1000
+# Project YIELD-LAG non-secret local settings.
+# Secrets and paid-data credentials are intentionally absent for M1.
 
-# ---------------------------------------------------------------------------
-# Network — Polygon mainnet by default; switch to Amoy for testnet smoke tests.
-# (Mumbai is deprecated; do not use.)
-# ---------------------------------------------------------------------------
-network:
-  chain: polygon                    # polygon | amoy
-  rpc_endpoints:                    # Pool, ordered by preference. Failover is automatic.
-    - https://polygon-rpc.com
-    - https://rpc.ankr.com/polygon
-    - https://polygon.drpc.org
-  ws_endpoints:                     # eth_subscribe targets for the chain listener
-    - wss://polygon-bor-rpc.publicnode.com
-  request_timeout_sec: 10
-  health_check_interval_sec: 30
+live_trading: false
+paper_trading: true
+max_order_usd: "10"
+max_position_usd: "50"
+max_daily_loss_usd: "20"
+max_latency_ms: 300
+stale_data_ms: 500
+kill_switch_on_error: true
 
-# ---------------------------------------------------------------------------
-# Polymarket — addresses are mainnet defaults. Verify before live trading.
-# ---------------------------------------------------------------------------
-polymarket:
-  clob_api: https://clob.polymarket.com
-  clob_ws: wss://ws-subscriptions-clob.polymarket.com
-  exchange_address: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-  ctf_address: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-  usdc_address: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-  reconnect_initial_delay_sec: 1
-  reconnect_max_delay_sec: 30
+crypto_symbols:
+  - BTCUSDT
+  - ETHUSDT
 
-# ---------------------------------------------------------------------------
-# Risk manager — these limits are HARD. Any signal that violates them is
-# rejected at the risk layer, never reaches the executor.
-# ---------------------------------------------------------------------------
-risk:
-  max_position_size_usdc: "500"
-  max_daily_drawdown_usdc: "200"
-  max_open_positions: 20
-  max_signals_per_minute: 30
-  min_arb_profit_usdc: "0.5"        # Absolute floor — drop signals smaller than this
-  min_arb_profit_bps: 30            # 0.3% of notional, after gas + fees
+hyperliquid_symbols:
+  - BTC
+  - ETH
 
-# ---------------------------------------------------------------------------
-# Strategies
-# ---------------------------------------------------------------------------
-arbitrage:
-  enabled: true
-  safety_margin_bps: 20             # Total cost must be < 1 USDC - 0.2%
-  maker_timeout_ms: 3000            # Cancel maker leg if not filled within this window
-  signal_ttl_ms: 5000               # Drop signals queued for too long
+cme_symbols:
+  - ZT
+  - ZF
+  - ZN
+  - TN
 
-copy_trade:
-  enabled: true
-  default_copy_ratio: "0.05"        # 5% of source size, unless address overrides it
-  default_max_slippage_bps: 50      # 0.5% slippage tolerance vs. observed fill price
-  signal_ttl_ms: 8000
-
-# ---------------------------------------------------------------------------
-# Alerting — Telegram chat IDs are not secret; the bot token IS (goes in .env).
-# ---------------------------------------------------------------------------
-alerting:
-  telegram_chat_id: "-1001234567890"
-  heartbeat_interval_sec: 3600
-  alert_on_hedge_fail: true
-  alert_on_consecutive_failures: 3   # Page after N consecutive on-chain failures
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logging:
-  level: INFO                       # DEBUG | INFO | WARNING | ERROR
-  format: json                      # json | console (use console only for local dev)
-  include_trace_id: true
-
-# ---------------------------------------------------------------------------
-# Storage
-# ---------------------------------------------------------------------------
-storage:
-  postgres_pool_min_size: 2
-  postgres_pool_max_size: 10
-  redis_decode_responses: true
+hyperliquid_network: mainnet
+hyperliquid_mainnet_ws_url: wss://api.hyperliquid.xyz/ws
+hyperliquid_testnet_ws_url: wss://api.hyperliquid-testnet.xyz/ws
