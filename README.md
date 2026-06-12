@@ -99,6 +99,31 @@ Export BBO-only Hyperliquid ticks for price research:
 python -m yield_lag_bot.jobs.export_ticks --venue hyperliquid --symbols BTC,ETH --channel bbo --out ticks_bbo.csv
 ```
 
+## M3B Databento Historical CME Import
+
+Install the optional Databento dependency and set the historical data API key from the environment:
+
+```bash
+pip install -e ".[dev,databento]"
+$env:DATABENTO_API_KEY="your-databento-api-key"
+```
+
+Download a 1-hour CME GLBX.MDP3 MBP-1 sample into the M3A-compatible CME CSV format:
+
+```bash
+python -m yield_lag_bot.jobs.download_cme_databento --dataset GLBX.MDP3 --schema mbp-1 --symbols ZN.c.0 --start 2026-06-12T13:00:00Z --end 2026-06-12T14:00:00Z --out cme_ticks.csv
+```
+
+The output columns are `timestamp,symbol,bid_price,ask_price,last_price`. Symbols are sent to Databento exactly as provided. `ZN.c.0`, `ZF.c.0`, `ZT.c.0`, and `TN.c.0` are intended examples, but availability depends on your Databento symbology access.
+
+Run the M3A lead-lag study using the downloaded CME CSV and a Hyperliquid BBO export:
+
+```bash
+python -m yield_lag_bot.jobs.run_lead_lag_study --cme-csv cme_ticks.csv --crypto-csv ticks_bbo.csv --out lead_lag_study.csv --cme-symbol ZN.c.0 --crypto-symbol BTC
+```
+
+This is historical research only. There is no CME live stream, Hyperliquid private API, or order placement in M3B. Keep `YIELD_LAG_LIVE_TRADING=false`.
+
 Run a research report from a CSV of normalized ticks:
 
 ```bash
@@ -117,8 +142,6 @@ For lead-lag price studies, prefer BBO-derived `mid_price` data. Trades-only rep
 ## Remaining M2 Work
 
 - Persist live public WebSocket events continuously into Postgres.
-- Integrate CME CSV/history with Hyperliquid exports into a unified research dataset.
-- Add Databento integration behind optional credentials.
 - Build richer event studies around scheduled macro releases and rates shocks.
 - Add signal generation, paper trading loop, fee/slippage calibration, and dashboard views.
 - Expand operational monitoring for stale streams, reconnects, and latency alerts.
