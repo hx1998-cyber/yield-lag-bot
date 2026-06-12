@@ -1,0 +1,66 @@
+# Single-instance deployment.
+# - bot: the asyncio orchestrator (one container, one event loop).
+# - postgres: source of truth for trades / positions / signals.
+# - redis: orderbook & position mirror (performance view only).
+
+name: baccarat
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-baccarat}
+      POSTGRES_USER: ${POSTGRES_USER:-baccarat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-baccarat} -d ${POSTGRES_DB:-baccarat}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF for durability of position mirror across restarts.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      # Override the URLs to point at the compose network names.
+      BACCARAT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-baccarat}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-baccarat}
+      BACCARAT_REDIS_URL: redis://redis:6379/0
+      BACCARAT_CONFIG_FILE: /app/config/settings.yaml
+    volumes:
+      # Mount real settings.yaml at runtime (do NOT bake into image).
+      - ../config/settings.yaml:/app/config/settings.yaml:ro
+      - bot-logs:/app/logs
+
+volumes:
+  postgres-data:
+  redis-data:
+  bot-logs:
