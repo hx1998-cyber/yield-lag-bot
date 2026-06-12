@@ -124,6 +124,32 @@ python -m yield_lag_bot.jobs.run_lead_lag_study --cme-csv cme_ticks.csv --crypto
 
 This is historical research only. There is no CME live stream, Hyperliquid private API, or order placement in M3B. Keep `YIELD_LAG_LIVE_TRADING=false`.
 
+## M3C Experiment Runner
+
+Run a repeatable CME Treasury futures vs Hyperliquid BBO lead-lag experiment from YAML:
+
+```bash
+python -m yield_lag_bot.jobs.run_experiment --config examples/experiments/macro_windows.example.yaml
+```
+
+The example uses local sample CSVs and writes:
+
+```text
+examples/experiment_outputs/macro_windows_example/sample_window/ZN__BTC__lead_lag.csv
+examples/experiment_outputs/macro_windows_example/summary.csv
+```
+
+To plug in real files, edit the window in `examples/experiments/macro_windows.example.yaml`:
+
+```yaml
+cme_csv: "path/to/cme_ticks.csv"
+crypto_csv: "path/to/ticks_bbo.csv"
+```
+
+`cme_ticks.csv` should use the M3A/M3B columns `timestamp,symbol,bid_price,ask_price,last_price`. `ticks_bbo.csv` should be a Hyperliquid BBO export with `symbol`, `receive_ts`, and either `mid_price` or `bid_price` plus `ask_price`.
+
+M3C is research orchestration only. It does not download Databento data, connect to a CME live stream, call Hyperliquid private APIs, or place orders. Keep `YIELD_LAG_LIVE_TRADING=false`.
+
 Run a research report from a CSV of normalized ticks:
 
 ```bash

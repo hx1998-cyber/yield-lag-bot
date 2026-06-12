@@ -1,0 +1,12 @@
+experiment_name: macro_windows_example
+output_dir: ../experiment_outputs
+windows:
+  - name: sample_window
+    start: "2024-01-01T00:00:00Z"
+    end: "2024-01-01T00:00:01Z"
+    cme_symbols: ["ZN"]
+    crypto_symbols: ["BTC"]
+    dataset: "local"
+    schema: "csv"
+    cme_csv: "../cme_sample.csv"
+    crypto_csv: "../hyperliquid_bbo_sample.csv"
