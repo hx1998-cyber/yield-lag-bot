@@ -51,3 +51,18 @@ redis-data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local research outputs
+ticks*.csv
+lead_lag_report*.csv
+data/exports/
+data/reports/
+
+# Python local cache
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Local env
+.env

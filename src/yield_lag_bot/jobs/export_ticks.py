@@ -15,11 +15,17 @@ def _parse_symbols(value: str) -> list[str]:
     return [symbol.strip().upper() for symbol in value.split(",") if symbol.strip()]
 
 
-async def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--venue", default="hyperliquid")
     parser.add_argument("--symbols", default="BTC,ETH")
+    parser.add_argument("--channel", choices=["trades", "bbo"], default=None)
     parser.add_argument("--out", required=True)
+    return parser
+
+
+async def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     settings = load_settings()
@@ -34,6 +40,7 @@ async def main() -> None:
                 session,
                 venue=args.venue,
                 symbols=_parse_symbols(args.symbols),
+                channel=args.channel,
                 out=args.out,
             )
     finally:

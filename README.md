@@ -93,6 +93,12 @@ Export Hyperliquid ticks:
 python -m yield_lag_bot.jobs.export_ticks --venue hyperliquid --symbols BTC,ETH --out ticks.csv
 ```
 
+Export BBO-only Hyperliquid ticks for price research:
+
+```bash
+python -m yield_lag_bot.jobs.export_ticks --venue hyperliquid --symbols BTC,ETH --channel bbo --out ticks_bbo.csv
+```
+
 Run a research report from a CSV of normalized ticks:
 
 ```bash
@@ -106,6 +112,7 @@ python -m yield_lag_bot.jobs.replay_market_data ticks.csv --out lead_lag_report.
 ```
 
 The CSV must include `symbol`, `receive_ts`, and either `mid_price` or `bid_price` plus `ask_price`.
+For lead-lag price studies, prefer BBO-derived `mid_price` data. Trades-only replay can verify the pipeline, but it is only a smoke test because trade prints are noisier than BBO/mid-price observations.
 
 ## Remaining M2 Work
 

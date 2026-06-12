@@ -118,3 +118,38 @@ def test_analyze_pair_does_not_warn_when_one_price_series_is_constant() -> None:
     assert results
     assert math.isnan(results[0].correlation)
     assert caught == []
+
+
+def test_prepare_ticks_prefers_mid_then_bbo_mid_then_last_price() -> None:
+    ticks = pd.DataFrame(
+        [
+            {
+                "symbol": "BTC",
+                "receive_ts": "2024-01-01T00:00:00.000Z",
+                "mid_price": "100",
+                "bid_price": "90",
+                "ask_price": "92",
+                "last_price": "80",
+            },
+            {
+                "symbol": "BTC",
+                "receive_ts": "2024-01-01T00:00:00.100Z",
+                "mid_price": None,
+                "bid_price": "101",
+                "ask_price": "103",
+                "last_price": "99",
+            },
+            {
+                "symbol": "BTC",
+                "receive_ts": "2024-01-01T00:00:00.200Z",
+                "mid_price": None,
+                "bid_price": None,
+                "ask_price": None,
+                "last_price": "104",
+            },
+        ]
+    )
+
+    prepared = LeadLagAnalyzer().prepare_ticks(ticks)
+
+    assert prepared["mid_price"].tolist() == [100.0, 102.0, 104.0]

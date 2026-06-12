@@ -36,6 +36,47 @@ def test_hyperliquid_trades_normalization() -> None:
     assert event.process_ts is not None
     assert event.last_price == Decimal("65000.5")
     assert event.sequence_id == 12
+    assert event.raw_payload == {
+        "channel": "trades",
+        "trade": {
+            "coin": "BTC",
+            "side": "B",
+            "px": "65000.5",
+            "sz": "0.01",
+            "time": 1_700_000_000_000,
+            "hash": "0xabc",
+            "tid": 12,
+        },
+    }
+
+
+def test_hyperliquid_batch_trades_emit_compact_individual_payloads() -> None:
+    receive_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    events = normalize_hyperliquid_message(
+        {
+            "channel": "trades",
+            "data": [
+                {"coin": "BTC", "px": "1", "sz": "1", "time": 1_700_000_000_000, "tid": 101},
+                {"coin": "BTC", "px": "2", "sz": "1", "time": 1_700_000_000_500, "tid": 102},
+            ],
+        },
+        receive_ts=receive_ts,
+    )
+
+    assert len(events) == 2
+    assert events[0].sequence_id == 101
+    assert events[0].exchange_ts == datetime.fromtimestamp(1_700_000_000_000 / 1000, tz=timezone.utc)
+    assert events[0].raw_payload == {
+        "channel": "trades",
+        "trade": {"coin": "BTC", "px": "1", "sz": "1", "time": 1_700_000_000_000, "tid": 101},
+    }
+    assert events[1].sequence_id == 102
+    assert events[1].exchange_ts == datetime.fromtimestamp(1_700_000_000_500 / 1000, tz=timezone.utc)
+    assert events[1].raw_payload == {
+        "channel": "trades",
+        "trade": {"coin": "BTC", "px": "2", "sz": "1", "time": 1_700_000_000_500, "tid": 102},
+    }
 
 
 def test_hyperliquid_bbo_normalization() -> None:
@@ -55,8 +96,17 @@ def test_hyperliquid_bbo_normalization() -> None:
     assert event.ask_price == Decimal("3500.2")
     assert event.bid_size == Decimal("2.0")
     assert event.ask_size == Decimal("3.0")
+    assert event.mid_price == Decimal("3500.15")
     assert event.last_price is None
     assert event.process_ts is not None
+    assert event.raw_payload == {
+        "channel": "bbo",
+        "data": {
+            "coin": "ETH",
+            "time": 1_700_000_000_500,
+            "bbo": [{"px": "3500.1", "sz": "2.0"}, {"px": "3500.2", "sz": "3.0"}],
+        },
+    }
 
 
 def test_hyperliquid_message_normalization_dispatches_trades_and_bbo() -> None:

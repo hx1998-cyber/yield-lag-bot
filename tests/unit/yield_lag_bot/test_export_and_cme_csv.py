@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
+
+import pytest
 
 from yield_lag_bot.data.cme_csv_loader import load_cme_csv
-from yield_lag_bot.data.recorder import export_ticks_rows
+from yield_lag_bot.data.recorder import export_market_ticks_csv, export_ticks_rows
+from yield_lag_bot.jobs.export_ticks import build_parser
 
 
 def test_csv_export_format() -> None:
@@ -46,6 +50,84 @@ def test_csv_export_format() -> None:
     ]
     assert frame.loc[0, "symbol"] == "BTC"
     assert frame.loc[0, "mid_price"] == Decimal("10.5")
+
+
+def test_export_ticks_parser_accepts_channel_bbo() -> None:
+    args = build_parser().parse_args(
+        [
+            "--venue",
+            "hyperliquid",
+            "--symbols",
+            "BTC,ETH",
+            "--channel",
+            "bbo",
+            "--out",
+            "ticks_bbo.csv",
+        ]
+    )
+
+    assert args.venue == "hyperliquid"
+    assert args.symbols == "BTC,ETH"
+    assert args.channel == "bbo"
+    assert args.out == "ticks_bbo.csv"
+
+
+@pytest.mark.asyncio
+async def test_export_market_ticks_csv_without_channel_omits_channel_filter(tmp_path: Path) -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.query: object | None = None
+            self.params: dict[str, object] | None = None
+
+        async def execute(self, query, params):
+            self.query = query
+            self.params = params
+            return []
+
+    session = FakeSession()
+
+    await export_market_ticks_csv(
+        session,  # type: ignore[arg-type]
+        venue="hyperliquid",
+        symbols=["BTC", "ETH"],
+        out=tmp_path / "ticks.csv",
+    )
+
+    assert "raw_payload->>'channel'" not in str(session.query)
+    assert session.params == {"venue": "hyperliquid", "symbols": ["BTC", "ETH"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["bbo", "trades"])
+async def test_export_market_ticks_csv_filters_by_channel(tmp_path: Path, channel: str) -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.query: object | None = None
+            self.params: dict[str, object] | None = None
+
+        async def execute(self, query, params):
+            self.query = query
+            self.params = params
+            return []
+
+    session = FakeSession()
+
+    await export_market_ticks_csv(
+        session,  # type: ignore[arg-type]
+        venue="hyperliquid",
+        symbols=["BTC", "ETH"],
+        channel=channel,
+        out=tmp_path / f"ticks_{channel}.csv",
+    )
+
+    query_text = str(session.query)
+    assert "raw_payload->>'channel' = :channel" in query_text
+    assert ":channel IS NULL" not in query_text
+    assert session.params == {
+        "venue": "hyperliquid",
+        "symbols": ["BTC", "ETH"],
+        "channel": channel,
+    }
 
 
 def test_cme_csv_loader(tmp_path) -> None:

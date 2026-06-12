@@ -63,8 +63,16 @@ class LeadLagAnalyzer:
             raise ValueError(f"ticks missing required columns: {sorted(missing)}")
         df = ticks.copy()
         df["receive_ts"] = pd.to_datetime(df["receive_ts"], utc=True)
-        if "mid_price" not in df.columns:
-            df["mid_price"] = (pd.to_numeric(df["bid_price"]) + pd.to_numeric(df["ask_price"])) / 2
+        if "mid_price" in df.columns:
+            df["mid_price"] = pd.to_numeric(df["mid_price"], errors="coerce")
+        else:
+            df["mid_price"] = pd.NA
+        if {"bid_price", "ask_price"}.issubset(df.columns):
+            bid_price = pd.to_numeric(df["bid_price"], errors="coerce")
+            ask_price = pd.to_numeric(df["ask_price"], errors="coerce")
+            df["mid_price"] = df["mid_price"].fillna((bid_price + ask_price) / 2)
+        if "last_price" in df.columns:
+            df["mid_price"] = df["mid_price"].fillna(pd.to_numeric(df["last_price"], errors="coerce"))
         df = df.dropna(subset=["mid_price"]).sort_values("receive_ts")
         return df
 
