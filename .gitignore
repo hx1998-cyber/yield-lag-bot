@@ -66,3 +66,10 @@ __pycache__/
 
 # Local env
 .env
+
+# Local research outputs
+ticks*.csv
+lead_lag_report*.csv
+lead_lag_study*.csv
+data/exports/
+data/reports/
