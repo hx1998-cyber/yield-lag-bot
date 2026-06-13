@@ -234,6 +234,36 @@ python -m yield_lag_bot.jobs.run_event_batch `
   --reuse-existing
 ```
 
+M3G writes per-event working files under the event report directory and also uses central reusable
+caches under the data root:
+
+```text
+<YIELD_LAG_DATA_ROOT>/reports/events/<event_name>/
+<YIELD_LAG_DATA_ROOT>/cme/databento/<schema>/
+<YIELD_LAG_DATA_ROOT>/hyperliquid/candles/
+```
+
+With `--reuse-existing`, M3G first checks the event-local expected CSV path, then the central cache.
+If a central cache file exists and is non-empty, it copies that file into the event report directory
+and runs the event study from the event-local copy. New downloads are saved to the central cache first
+and then copied into the event directory.
+
+Databento `mbp-1` can be high-volume. By default, M3G blocks `mbp-1` CME windows longer than 30
+minutes before making the request. Prefer this workflow:
+
+```powershell
+python -m yield_lag_bot.jobs.run_event_batch `
+  --config E:\QuantData\yield-lag\experiments\central_bank_events.yaml `
+  --dry-run
+
+python -m yield_lag_bot.jobs.run_event_batch `
+  --config E:\QuantData\yield-lag\experiments\central_bank_events.yaml `
+  --reuse-existing
+```
+
+If a CME file is truly missing, shrink the event window before downloading. For intentional large
+`mbp-1` historical downloads, pass `--allow-large-cme-download` explicitly.
+
 Each event computes `start = event_time_utc - pre_minutes` and `end = event_time_utc + post_minutes`, downloads Databento CME CSVs for each CME symbol, downloads Hyperliquid public candles for each crypto symbol, then runs the M3E event study for every CME/crypto pair.
 
 Per-pair detailed and summary reports are written under:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -61,6 +62,24 @@ class EventBatchConfig:
     events: tuple[EventBatchItem, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class EventBatchPlan:
+    event: EventBatchItem
+    event_time_utc: str
+    start: str
+    end: str
+    event_dir: Path
+    cme_paths: dict[str, Path]
+    cme_cache_paths: dict[str, Path]
+    cme_cache_matches: dict[str, Path | None]
+    crypto_paths: dict[str, Path]
+    crypto_cache_paths: dict[str, Path]
+    crypto_cache_matches: dict[str, Path | None]
+    pair_paths: dict[tuple[str, str], tuple[Path, Path]]
+    cme_large_download_blocked: bool
+    cme_large_download_message: str
+
+
 CmeDownloadFunc = Callable[..., None]
 CryptoDownloadFunc = Callable[..., None]
 EventStudyFunc = Callable[..., None]
@@ -69,6 +88,9 @@ EventStudyFunc = Callable[..., None]
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--reuse-existing", action="store_true")
+    parser.add_argument("--allow-large-cme-download", action="store_true")
     return parser
 
 
@@ -76,8 +98,15 @@ def main() -> None:
     args = build_parser().parse_args()
     config = load_event_batch_config(args.config)
     settings = load_settings()
-    summary_path = run_event_batch(config=config, data_root=settings.data_root)
-    print(f"Wrote event batch summary: {summary_path}")
+    summary_path = run_event_batch(
+        config=config,
+        data_root=settings.data_root,
+        dry_run=args.dry_run,
+        reuse_existing=args.reuse_existing,
+        allow_large_cme_download=args.allow_large_cme_download,
+    )
+    if not args.dry_run:
+        print(f"Wrote event batch summary: {summary_path}")
 
 
 def load_event_batch_config(path: str | Path) -> EventBatchConfig:
@@ -100,9 +129,21 @@ def run_event_batch(
     cme_download_func: CmeDownloadFunc | None = None,
     crypto_download_func: CryptoDownloadFunc | None = None,
     event_study_func: EventStudyFunc = run_event_study,
+    dry_run: bool = False,
+    reuse_existing: bool = False,
+    allow_large_cme_download: bool = False,
 ) -> Path:
     root = Path(data_root)
     events_root = root / "reports" / "events"
+    if dry_run:
+        _print_dry_run(
+            config=config,
+            data_root=root,
+            events_root=events_root,
+            allow_large_cme_download=allow_large_cme_download,
+        )
+        return events_root / "summary.csv"
+
     events_root.mkdir(parents=True, exist_ok=True)
     aggregate_rows: list[dict[str, object]] = []
     for event in config.events:
@@ -113,6 +154,8 @@ def run_event_batch(
                 cme_download_func=cme_download_func or _download_cme_csv,
                 crypto_download_func=crypto_download_func or download_candles_to_csv,
                 event_study_func=event_study_func,
+                reuse_existing=reuse_existing,
+                allow_large_cme_download=allow_large_cme_download,
             )
         )
     summary_path = events_root / "summary.csv"
@@ -127,28 +170,43 @@ def _run_event(
     cme_download_func: CmeDownloadFunc,
     crypto_download_func: CryptoDownloadFunc,
     event_study_func: EventStudyFunc,
+    reuse_existing: bool,
+    allow_large_cme_download: bool,
 ) -> list[dict[str, object]]:
-    event_time = _parse_iso_utc(event.event_time_utc)
-    start = event_time - pd.Timedelta(minutes=event.pre_minutes)
-    end = event_time + pd.Timedelta(minutes=event.post_minutes)
-    start_iso = _format_iso_utc(start)
-    end_iso = _format_iso_utc(end)
-    event_dir = events_root / _safe_token(event.event_name)
+    data_root = events_root.parent.parent
+    plan = _build_event_plan(event=event, data_root=data_root, events_root=events_root)
+    start_iso = plan.start
+    end_iso = plan.end
+    event_dir = plan.event_dir
     event_dir.mkdir(parents=True, exist_ok=True)
 
     cme_paths: dict[str, Path] = {}
     cme_errors: dict[str, str] = {}
     for cme_symbol in event.cme_symbols:
-        path = event_dir / f"{_safe_token(cme_symbol)}__cme.csv"
+        path = plan.cme_paths[cme_symbol]
+        cache_path = plan.cme_cache_paths[cme_symbol]
         try:
-            cme_download_func(
-                dataset=event.cme_dataset,
-                schema=event.cme_schema,
-                symbols=[cme_symbol],
-                start=start_iso,
-                end=end_iso,
-                out=path,
-            )
+            if reuse_existing and _is_nonempty_file(path):
+                print(f"Reusing existing CME CSV for {cme_symbol}: {path}")
+            elif reuse_existing and plan.cme_cache_matches[cme_symbol] is not None:
+                central_cache_path = plan.cme_cache_matches[cme_symbol]
+                print(f"Reusing central cache: {central_cache_path}")
+                _copy_to_event_path(central_cache_path, path)
+            else:
+                _raise_if_large_cme_download_blocked(
+                    plan=plan,
+                    allow_large_cme_download=allow_large_cme_download,
+                )
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cme_download_func(
+                    dataset=event.cme_dataset,
+                    schema=event.cme_schema,
+                    symbols=[cme_symbol],
+                    start=start_iso,
+                    end=end_iso,
+                    out=cache_path,
+                )
+                _copy_to_event_path(cache_path, path)
             cme_paths[cme_symbol] = path
         except Exception as exc:  # noqa: BLE001 - batch summary should capture per-symbol failures.
             cme_errors[cme_symbol] = str(exc)
@@ -156,15 +214,25 @@ def _run_event(
     crypto_paths: dict[str, Path] = {}
     crypto_errors: dict[str, str] = {}
     for crypto_symbol in event.crypto_symbols:
-        path = event_dir / f"{_safe_token(crypto_symbol)}__candles.csv"
+        path = plan.crypto_paths[crypto_symbol]
+        cache_path = plan.crypto_cache_paths[crypto_symbol]
         try:
-            crypto_download_func(
-                coin=crypto_symbol,
-                interval=event.crypto_interval,
-                start=start_iso,
-                end=end_iso,
-                out=path,
-            )
+            if reuse_existing and _is_nonempty_file(path):
+                print(f"Reusing existing Hyperliquid candle CSV for {crypto_symbol}: {path}")
+            elif reuse_existing and plan.crypto_cache_matches[crypto_symbol] is not None:
+                central_cache_path = plan.crypto_cache_matches[crypto_symbol]
+                print(f"Reusing central cache: {central_cache_path}")
+                _copy_to_event_path(central_cache_path, path)
+            else:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                crypto_download_func(
+                    coin=crypto_symbol,
+                    interval=event.crypto_interval,
+                    start=start_iso,
+                    end=end_iso,
+                    out=cache_path,
+                )
+                _copy_to_event_path(cache_path, path)
             crypto_paths[crypto_symbol] = path
         except Exception as exc:  # noqa: BLE001 - batch summary should capture per-symbol failures.
             crypto_errors[crypto_symbol] = str(exc)
@@ -172,12 +240,7 @@ def _run_event(
     rows: list[dict[str, object]] = []
     for cme_symbol in event.cme_symbols:
         for crypto_symbol in event.crypto_symbols:
-            result_path = event_dir / (
-                f"{_safe_token(cme_symbol)}__{_safe_token(crypto_symbol)}__event_detail.csv"
-            )
-            summary_path = event_dir / (
-                f"{_safe_token(cme_symbol)}__{_safe_token(crypto_symbol)}__event_summary.csv"
-            )
+            result_path, summary_path = plan.pair_paths[(cme_symbol, crypto_symbol)]
             blocking_error = cme_errors.get(cme_symbol) or crypto_errors.get(crypto_symbol)
             if blocking_error is not None:
                 _write_pair_failure_outputs(
@@ -217,6 +280,177 @@ def _run_event(
                 )
             )
     return rows
+
+
+def _build_event_plan(*, event: EventBatchItem, data_root: Path, events_root: Path) -> EventBatchPlan:
+    event_time = _parse_iso_utc(event.event_time_utc)
+    start = event_time - pd.Timedelta(minutes=event.pre_minutes)
+    end = event_time + pd.Timedelta(minutes=event.post_minutes)
+    start_token = _cache_time_token(start)
+    end_token = _cache_time_token(end)
+    event_dir = events_root / _safe_token(event.event_name)
+    cme_paths = {
+        cme_symbol: event_dir / f"{_safe_token(cme_symbol)}__cme.csv"
+        for cme_symbol in event.cme_symbols
+    }
+    cme_cache_paths = {
+        cme_symbol: _cme_cache_dir(data_root, event.cme_schema)
+        / f"cme_{_safe_token(cme_symbol)}_{start_token}_{end_token}.csv"
+        for cme_symbol in event.cme_symbols
+    }
+    cme_cache_matches = {
+        cme_symbol: _first_nonempty_match(
+            _cme_cache_dir(data_root, event.cme_schema).glob(
+                f"cme_{_safe_token(cme_symbol)}*{start_token}*{end_token}.csv"
+            )
+        )
+        for cme_symbol in event.cme_symbols
+    }
+    crypto_paths = {
+        crypto_symbol: event_dir / f"{_safe_token(crypto_symbol)}__candles.csv"
+        for crypto_symbol in event.crypto_symbols
+    }
+    crypto_cache_paths = {
+        crypto_symbol: _crypto_cache_dir(data_root)
+        / f"{_safe_token(crypto_symbol)}_{_safe_token(event.crypto_interval)}_{start_token}_{end_token}.csv"
+        for crypto_symbol in event.crypto_symbols
+    }
+    crypto_cache_matches = {
+        crypto_symbol: _first_nonempty_match(
+            _crypto_cache_dir(data_root).glob(
+                f"{_safe_token(crypto_symbol)}*{_safe_token(event.crypto_interval)}*"
+                f"{start_token}_{end_token}.csv"
+            )
+        )
+        for crypto_symbol in event.crypto_symbols
+    }
+    pair_paths = {
+        (cme_symbol, crypto_symbol): (
+            event_dir / f"{_safe_token(cme_symbol)}__{_safe_token(crypto_symbol)}__event_detail.csv",
+            event_dir / f"{_safe_token(cme_symbol)}__{_safe_token(crypto_symbol)}__event_summary.csv",
+        )
+        for cme_symbol in event.cme_symbols
+        for crypto_symbol in event.crypto_symbols
+    }
+    return EventBatchPlan(
+        event=event,
+        event_time_utc=_format_iso_utc(event_time),
+        start=_format_iso_utc(start),
+        end=_format_iso_utc(end),
+        event_dir=event_dir,
+        cme_paths=cme_paths,
+        cme_cache_paths=cme_cache_paths,
+        cme_cache_matches=cme_cache_matches,
+        crypto_paths=crypto_paths,
+        crypto_cache_paths=crypto_cache_paths,
+        crypto_cache_matches=crypto_cache_matches,
+        pair_paths=pair_paths,
+        cme_large_download_blocked=_large_cme_download_blocked(event=event, start=start, end=end),
+        cme_large_download_message=_large_cme_download_message(event=event, start=start, end=end),
+    )
+
+
+def _print_dry_run(
+    *,
+    config: EventBatchConfig,
+    data_root: Path,
+    events_root: Path,
+    allow_large_cme_download: bool,
+) -> None:
+    print("M3G dry run: no downloads or reports will be written.")
+    print(f"expected aggregate output path: {events_root / 'summary.csv'}")
+    for event in config.events:
+        plan = _build_event_plan(event=event, data_root=data_root, events_root=events_root)
+        print("")
+        print(f"event_name: {event.event_name}")
+        print(f"event_time_utc: {plan.event_time_utc}")
+        print(f"start: {plan.start}")
+        print(f"end: {plan.end}")
+        print(f"cme_symbols: {', '.join(event.cme_symbols)}")
+        print(f"crypto_symbols: {', '.join(event.crypto_symbols)}")
+        print("expected CME CSV paths:")
+        for symbol, path in plan.cme_paths.items():
+            print(f"  {symbol}: {path}")
+        print("expected CME central cache paths:")
+        for symbol, path in plan.cme_cache_paths.items():
+            match = plan.cme_cache_matches[symbol]
+            exists = _is_nonempty_file(path) or match is not None
+            print(f"  {symbol}: {path} exists={exists}")
+            if match is not None and match != path:
+                print(f"  {symbol} matched central cache: {match}")
+        guard_blocked = plan.cme_large_download_blocked and not allow_large_cme_download
+        print(f"large CME guard would block request: {guard_blocked}")
+        if guard_blocked:
+            print(f"large CME guard message: {plan.cme_large_download_message}")
+        print("expected Hyperliquid candle CSV paths:")
+        for symbol, path in plan.crypto_paths.items():
+            print(f"  {symbol}: {path}")
+        print("expected Hyperliquid central cache paths:")
+        for symbol, path in plan.crypto_cache_paths.items():
+            match = plan.crypto_cache_matches[symbol]
+            exists = _is_nonempty_file(path) or match is not None
+            print(f"  {symbol}: {path} exists={exists}")
+            if match is not None and match != path:
+                print(f"  {symbol} matched central cache: {match}")
+        print("expected event study output paths:")
+        for (cme_symbol, crypto_symbol), (detail_path, summary_path) in plan.pair_paths.items():
+            print(f"  {cme_symbol}->{crypto_symbol} detail: {detail_path}")
+            print(f"  {cme_symbol}->{crypto_symbol} summary: {summary_path}")
+
+
+def _is_nonempty_file(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def _first_nonempty_match(paths) -> Path | None:
+    matches = sorted(path for path in paths if _is_nonempty_file(path))
+    return matches[0] if matches else None
+
+
+def _copy_to_event_path(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+
+
+def _cme_cache_dir(data_root: Path, schema: str) -> Path:
+    return data_root / "cme" / "databento" / _schema_cache_token(schema)
+
+
+def _crypto_cache_dir(data_root: Path) -> Path:
+    return data_root / "hyperliquid" / "candles"
+
+
+def _schema_cache_token(schema: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "", schema).lower()
+
+
+def _cache_time_token(value: pd.Timestamp | datetime) -> str:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(timezone.utc)
+    return timestamp.tz_convert(timezone.utc).strftime("%Y%m%d_%H%M")
+
+
+def _large_cme_download_blocked(*, event: EventBatchItem, start: pd.Timestamp, end: pd.Timestamp) -> bool:
+    return _schema_cache_token(event.cme_schema) == "mbp1" and (end - start) > pd.Timedelta(minutes=30)
+
+
+def _large_cme_download_message(*, event: EventBatchItem, start: pd.Timestamp, end: pd.Timestamp) -> str:
+    minutes = int((end - start).total_seconds() / 60)
+    return (
+        f"CME download guard blocked {event.cme_schema} request for {minutes} minutes. "
+        "mbp-1 is high-volume; use a shorter window, reuse existing files, or explicitly pass "
+        "--allow-large-cme-download."
+    )
+
+
+def _raise_if_large_cme_download_blocked(
+    *,
+    plan: EventBatchPlan,
+    allow_large_cme_download: bool,
+) -> None:
+    if plan.cme_large_download_blocked and not allow_large_cme_download:
+        raise ValueError(plan.cme_large_download_message)
 
 
 def _run_pair(

@@ -73,6 +73,7 @@ def test_event_batch_mocked_successful_batch(tmp_path: Path) -> None:
         cme_download_func=cme_download_func,
         crypto_download_func=crypto_download_func,
         event_study_func=event_study_func,
+        allow_large_cme_download=True,
     )
 
     summary = pd.read_csv(summary_path)
@@ -133,6 +134,7 @@ def test_event_batch_failed_pair_continues_remaining_pairs(tmp_path: Path) -> No
         cme_download_func=cme_download_func,
         crypto_download_func=crypto_download_func,
         event_study_func=event_study_func,
+        allow_large_cme_download=True,
     )
 
     summary = pd.read_csv(summary_path).sort_values("cme_symbol").reset_index(drop=True)
@@ -177,10 +179,18 @@ def test_event_batch_dry_run_does_not_call_downloads_or_write_reports(tmp_path: 
     assert calls == []
     assert summary_path == tmp_path / "data" / "reports" / "events" / "summary.csv"
     assert "M3G dry run" in output
+    assert "expected aggregate output path:" in output
     assert "event_name: fomc_test" in output
+    assert "event_time_utc: 2026-06-17T18:00:00Z" in output
     assert "start: 2026-06-17T17:00:00Z" in output
     assert "ZNM6__cme.csv" in output
+    assert "expected CME central cache paths:" in output
+    assert "cme_ZNM6_20260617_1700_20260617_2000.csv exists=False" in output
+    assert "large CME guard would block request: True" in output
+    assert "mbp-1 is high-volume" in output
     assert "BTC__candles.csv" in output
+    assert "expected Hyperliquid central cache paths:" in output
+    assert "BTC_1m_20260617_1700_20260617_2000.csv exists=False" in output
     assert "ZNM6__BTC__event_detail.csv" in output
     assert not (tmp_path / "data").exists()
 
@@ -229,6 +239,191 @@ def test_event_batch_reuse_existing_skips_downloads(tmp_path: Path) -> None:
     assert summary.iloc[0]["status"] == "ok"
 
 
+def test_event_batch_reuse_existing_prints_reused_files(tmp_path: Path, capsys) -> None:
+    config = load_event_batch_config(_write_config(tmp_path, cme_symbols=["ZNM6"], crypto_symbols=["BTC"]))
+    event_dir = tmp_path / "data" / "reports" / "events" / "fomc_test"
+    event_dir.mkdir(parents=True)
+    (event_dir / "ZNM6__cme.csv").write_text(
+        "timestamp,symbol,bid_price,ask_price,last_price\n",
+        encoding="utf-8",
+    )
+    (event_dir / "BTC__candles.csv").write_text(
+        "timestamp,symbol,open,high,low,close,volume,price\n",
+        encoding="utf-8",
+    )
+
+    def event_study_func(**kwargs) -> None:
+        Path(kwargs["summary_out"]).write_text(
+            _summary_csv_row(status="ok", cme_symbol="ZNM6", crypto_symbol="BTC"),
+            encoding="utf-8",
+        )
+        Path(kwargs["out"]).write_text("status,timestamp\nok,2026-06-17T17:00:00+00:00\n", encoding="utf-8")
+
+    run_event_batch(
+        config=config,
+        data_root=tmp_path / "data",
+        cme_download_func=lambda **kwargs: None,
+        crypto_download_func=lambda **kwargs: None,
+        event_study_func=event_study_func,
+        reuse_existing=True,
+    )
+
+    output = capsys.readouterr().out
+    assert "Reusing existing CME CSV for ZNM6:" in output
+    assert "Reusing existing Hyperliquid candle CSV for BTC:" in output
+
+
+def test_event_batch_reuse_existing_uses_central_cme_cache(tmp_path: Path, capsys) -> None:
+    config = load_event_batch_config(_write_config(tmp_path, cme_symbols=["ZNM6"], crypto_symbols=["BTC"]))
+    data_root = tmp_path / "data"
+    cme_cache = data_root / "cme" / "databento" / "mbp1" / "cme_ZNM6_20260617_1700_20260617_2000.csv"
+    cme_cache.parent.mkdir(parents=True)
+    cme_cache.write_text("timestamp,symbol,bid_price,ask_price,last_price\n", encoding="utf-8")
+    event_dir = data_root / "reports" / "events" / "fomc_test"
+    event_dir.mkdir(parents=True)
+    (event_dir / "BTC__candles.csv").write_text(
+        "timestamp,symbol,open,high,low,close,volume,price\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def cme_download_func(**kwargs) -> None:
+        calls.append("cme")
+
+    def event_study_func(**kwargs) -> None:
+        calls.append("study")
+        assert Path(kwargs["cme_csv"]) == event_dir / "ZNM6__cme.csv"
+        assert Path(kwargs["cme_csv"]).read_text(encoding="utf-8").startswith("timestamp")
+        Path(kwargs["summary_out"]).write_text(
+            _summary_csv_row(status="ok", cme_symbol="ZNM6", crypto_symbol="BTC"),
+            encoding="utf-8",
+        )
+        Path(kwargs["out"]).write_text("status,timestamp\nok,2026-06-17T17:00:00+00:00\n", encoding="utf-8")
+
+    run_event_batch(
+        config=config,
+        data_root=data_root,
+        cme_download_func=cme_download_func,
+        crypto_download_func=lambda **kwargs: None,
+        event_study_func=event_study_func,
+        reuse_existing=True,
+    )
+
+    output = capsys.readouterr().out
+    assert calls == ["study"]
+    assert "Reusing central cache:" in output
+    assert str(cme_cache) in output
+    assert (event_dir / "ZNM6__cme.csv").exists()
+
+
+def test_event_batch_reuse_existing_uses_central_crypto_cache(tmp_path: Path, capsys) -> None:
+    config = load_event_batch_config(_write_config(tmp_path, cme_symbols=["ZNM6"], crypto_symbols=["BTC"]))
+    data_root = tmp_path / "data"
+    crypto_cache = data_root / "hyperliquid" / "candles" / "BTC_1m_20260617_1700_20260617_2000.csv"
+    crypto_cache.parent.mkdir(parents=True)
+    crypto_cache.write_text("timestamp,symbol,open,high,low,close,volume,price\n", encoding="utf-8")
+    event_dir = data_root / "reports" / "events" / "fomc_test"
+    event_dir.mkdir(parents=True)
+    (event_dir / "ZNM6__cme.csv").write_text(
+        "timestamp,symbol,bid_price,ask_price,last_price\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def crypto_download_func(**kwargs) -> None:
+        calls.append("crypto")
+
+    def event_study_func(**kwargs) -> None:
+        calls.append("study")
+        assert Path(kwargs["crypto_csv"]) == event_dir / "BTC__candles.csv"
+        assert Path(kwargs["crypto_csv"]).read_text(encoding="utf-8").startswith("timestamp")
+        Path(kwargs["summary_out"]).write_text(
+            _summary_csv_row(status="ok", cme_symbol="ZNM6", crypto_symbol="BTC"),
+            encoding="utf-8",
+        )
+        Path(kwargs["out"]).write_text("status,timestamp\nok,2026-06-17T17:00:00+00:00\n", encoding="utf-8")
+
+    run_event_batch(
+        config=config,
+        data_root=data_root,
+        cme_download_func=lambda **kwargs: None,
+        crypto_download_func=crypto_download_func,
+        event_study_func=event_study_func,
+        reuse_existing=True,
+    )
+
+    output = capsys.readouterr().out
+    assert calls == ["study"]
+    assert "Reusing central cache:" in output
+    assert str(crypto_cache) in output
+    assert (event_dir / "BTC__candles.csv").exists()
+
+
+def test_event_batch_large_mbp1_window_fails_without_allow_flag(tmp_path: Path) -> None:
+    config = load_event_batch_config(_write_config(tmp_path, cme_symbols=["ZNM6"], crypto_symbols=["BTC"]))
+    calls: list[str] = []
+
+    def cme_download_func(**kwargs) -> None:
+        calls.append("cme")
+
+    def crypto_download_func(**kwargs) -> None:
+        calls.append("crypto")
+        Path(kwargs["out"]).write_text("timestamp,symbol,open,high,low,close,volume,price\n", encoding="utf-8")
+
+    summary_path = run_event_batch(
+        config=config,
+        data_root=tmp_path / "data",
+        cme_download_func=cme_download_func,
+        crypto_download_func=crypto_download_func,
+        event_study_func=lambda **kwargs: calls.append("study"),
+    )
+
+    summary = pd.read_csv(summary_path)
+    row = summary.iloc[0]
+    assert calls == ["crypto"]
+    assert row["status"] == "failed"
+    assert "mbp-1 is high-volume" in row["error_message"]
+    assert "--allow-large-cme-download" in row["error_message"]
+
+
+def test_event_batch_large_mbp1_window_downloads_with_allow_flag(tmp_path: Path) -> None:
+    config = load_event_batch_config(_write_config(tmp_path, cme_symbols=["ZNM6"], crypto_symbols=["BTC"]))
+    calls: list[str] = []
+
+    def cme_download_func(**kwargs) -> None:
+        calls.append("cme")
+        assert Path(kwargs["out"]).name == "cme_ZNM6_20260617_1700_20260617_2000.csv"
+        Path(kwargs["out"]).write_text("timestamp,symbol,bid_price,ask_price,last_price\n", encoding="utf-8")
+
+    def crypto_download_func(**kwargs) -> None:
+        calls.append("crypto")
+        assert Path(kwargs["out"]).name == "BTC_1m_20260617_1700_20260617_2000.csv"
+        Path(kwargs["out"]).write_text("timestamp,symbol,open,high,low,close,volume,price\n", encoding="utf-8")
+
+    def event_study_func(**kwargs) -> None:
+        calls.append("study")
+        Path(kwargs["summary_out"]).write_text(
+            _summary_csv_row(status="ok", cme_symbol="ZNM6", crypto_symbol="BTC"),
+            encoding="utf-8",
+        )
+        Path(kwargs["out"]).write_text("status,timestamp\nok,2026-06-17T17:00:00+00:00\n", encoding="utf-8")
+
+    summary_path = run_event_batch(
+        config=config,
+        data_root=tmp_path / "data",
+        cme_download_func=cme_download_func,
+        crypto_download_func=crypto_download_func,
+        event_study_func=event_study_func,
+        allow_large_cme_download=True,
+    )
+
+    summary = pd.read_csv(summary_path)
+    assert calls == ["cme", "crypto", "study"]
+    assert summary.iloc[0]["status"] == "ok"
+    assert (tmp_path / "data" / "cme" / "databento" / "mbp1").exists()
+    assert (tmp_path / "data" / "hyperliquid" / "candles").exists()
+
+
 def test_event_batch_failed_event_study_writes_error_message_and_continues(tmp_path: Path) -> None:
     config = load_event_batch_config(
         _write_config(tmp_path, cme_symbols=["ZNM6"], crypto_symbols=["BTC", "ETH"])
@@ -255,6 +450,7 @@ def test_event_batch_failed_event_study_writes_error_message_and_continues(tmp_p
         cme_download_func=cme_download_func,
         crypto_download_func=crypto_download_func,
         event_study_func=event_study_func,
+        allow_large_cme_download=True,
     )
 
     summary = pd.read_csv(summary_path).sort_values("crypto_symbol").reset_index(drop=True)
