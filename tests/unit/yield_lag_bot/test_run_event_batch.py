@@ -151,6 +151,124 @@ def test_event_batch_failed_pair_continues_remaining_pairs(tmp_path: Path) -> No
     assert succeeded["sample_count"] == 7
 
 
+def test_event_batch_dry_run_does_not_call_downloads_or_write_reports(tmp_path: Path, capsys) -> None:
+    config = load_event_batch_config(_write_config(tmp_path, cme_symbols=["ZNM6"], crypto_symbols=["BTC"]))
+    calls: list[str] = []
+
+    def cme_download_func(**kwargs) -> None:
+        calls.append("cme")
+
+    def crypto_download_func(**kwargs) -> None:
+        calls.append("crypto")
+
+    def event_study_func(**kwargs) -> None:
+        calls.append("study")
+
+    summary_path = run_event_batch(
+        config=config,
+        data_root=tmp_path / "data",
+        cme_download_func=cme_download_func,
+        crypto_download_func=crypto_download_func,
+        event_study_func=event_study_func,
+        dry_run=True,
+    )
+
+    output = capsys.readouterr().out
+    assert calls == []
+    assert summary_path == tmp_path / "data" / "reports" / "events" / "summary.csv"
+    assert "M3G dry run" in output
+    assert "event_name: fomc_test" in output
+    assert "start: 2026-06-17T17:00:00Z" in output
+    assert "ZNM6__cme.csv" in output
+    assert "BTC__candles.csv" in output
+    assert "ZNM6__BTC__event_detail.csv" in output
+    assert not (tmp_path / "data").exists()
+
+
+def test_event_batch_reuse_existing_skips_downloads(tmp_path: Path) -> None:
+    config = load_event_batch_config(_write_config(tmp_path, cme_symbols=["ZNM6"], crypto_symbols=["BTC"]))
+    event_dir = tmp_path / "data" / "reports" / "events" / "fomc_test"
+    event_dir.mkdir(parents=True)
+    (event_dir / "ZNM6__cme.csv").write_text(
+        "timestamp,symbol,bid_price,ask_price,last_price\n",
+        encoding="utf-8",
+    )
+    (event_dir / "BTC__candles.csv").write_text(
+        "timestamp,symbol,open,high,low,close,volume,price\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def cme_download_func(**kwargs) -> None:
+        calls.append("cme")
+
+    def crypto_download_func(**kwargs) -> None:
+        calls.append("crypto")
+
+    def event_study_func(**kwargs) -> None:
+        calls.append("study")
+        assert Path(kwargs["cme_csv"]).name == "ZNM6__cme.csv"
+        assert Path(kwargs["crypto_csv"]).name == "BTC__candles.csv"
+        Path(kwargs["summary_out"]).write_text(
+            _summary_csv_row(status="ok", cme_symbol="ZNM6", crypto_symbol="BTC"),
+            encoding="utf-8",
+        )
+        Path(kwargs["out"]).write_text("status,timestamp\nok,2026-06-17T17:00:00+00:00\n", encoding="utf-8")
+
+    summary_path = run_event_batch(
+        config=config,
+        data_root=tmp_path / "data",
+        cme_download_func=cme_download_func,
+        crypto_download_func=crypto_download_func,
+        event_study_func=event_study_func,
+        reuse_existing=True,
+    )
+
+    summary = pd.read_csv(summary_path)
+    assert calls == ["study"]
+    assert summary.iloc[0]["status"] == "ok"
+
+
+def test_event_batch_failed_event_study_writes_error_message_and_continues(tmp_path: Path) -> None:
+    config = load_event_batch_config(
+        _write_config(tmp_path, cme_symbols=["ZNM6"], crypto_symbols=["BTC", "ETH"])
+    )
+
+    def cme_download_func(**kwargs) -> None:
+        Path(kwargs["out"]).write_text("timestamp,symbol,bid_price,ask_price,last_price\n", encoding="utf-8")
+
+    def crypto_download_func(**kwargs) -> None:
+        Path(kwargs["out"]).write_text("timestamp,symbol,open,high,low,close,volume,price\n", encoding="utf-8")
+
+    def event_study_func(**kwargs) -> None:
+        if kwargs["crypto_symbol"] == "BTC":
+            raise RuntimeError("event study insufficient overlap for BTC")
+        Path(kwargs["summary_out"]).write_text(
+            _summary_csv_row(status="ok", cme_symbol="ZNM6", crypto_symbol="ETH"),
+            encoding="utf-8",
+        )
+        Path(kwargs["out"]).write_text("status,timestamp\nok,2026-06-17T17:00:00+00:00\n", encoding="utf-8")
+
+    summary_path = run_event_batch(
+        config=config,
+        data_root=tmp_path / "data",
+        cme_download_func=cme_download_func,
+        crypto_download_func=crypto_download_func,
+        event_study_func=event_study_func,
+    )
+
+    summary = pd.read_csv(summary_path).sort_values("crypto_symbol").reset_index(drop=True)
+    failed = summary[summary["crypto_symbol"] == "BTC"].iloc[0]
+    succeeded = summary[summary["crypto_symbol"] == "ETH"].iloc[0]
+    assert failed["status"] == "failed"
+    assert failed["start"] == "2026-06-17T17:00:00Z"
+    assert failed["end"] == "2026-06-17T20:00:00Z"
+    assert "event study insufficient overlap for BTC" in failed["error_message"]
+    assert succeeded["status"] == "ok"
+    assert succeeded["start"] == "2026-06-17T17:00:00Z"
+    assert succeeded["end"] == "2026-06-17T20:00:00Z"
+
+
 def _write_config(tmp_path: Path, *, cme_symbols: list[str], crypto_symbols: list[str]) -> Path:
     config_path = tmp_path / "events.yaml"
     config_path.write_text(
@@ -169,3 +287,18 @@ events:
         encoding="utf-8",
     )
     return config_path
+
+
+def _summary_csv_row(*, status: str, cme_symbol: str, crypto_symbol: str) -> str:
+    return (
+        "status,error_message,cme_symbol,crypto_symbol,start,end,sample_count,"
+        "valid_cme_return_count,valid_forward_1m_count,valid_forward_3m_count,"
+        "valid_forward_5m_count,cme_nonzero_return_count,cme_abs_return_bps_mean,"
+        "cme_abs_return_bps_max,crypto_abs_forward_1m_bps_mean,"
+        "crypto_abs_forward_3m_bps_mean,crypto_abs_forward_5m_bps_mean,"
+        "correlation_1m,correlation_3m,correlation_5m,direction_hit_rate_1m,"
+        "direction_hit_rate_3m,direction_hit_rate_5m,quality_status\n"
+        f"{status},,{cme_symbol},{crypto_symbol},2026-06-17T17:00:00+00:00,"
+        "2026-06-17T20:00:00+00:00,42,41,41,39,37,20,1.1,4.2,2.0,3.0,5.0,"
+        "0.1,0.2,0.3,0.51,0.52,0.53,ok\n"
+    )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -69,7 +70,31 @@ def test_export_ticks_parser_accepts_channel_bbo() -> None:
     assert args.venue == "hyperliquid"
     assert args.symbols == "BTC,ETH"
     assert args.channel == "bbo"
+    assert args.start is None
+    assert args.end is None
     assert args.out == "ticks_bbo.csv"
+
+
+def test_export_ticks_parser_accepts_start_end() -> None:
+    args = build_parser().parse_args(
+        [
+            "--venue",
+            "hyperliquid",
+            "--symbols",
+            "BTC",
+            "--channel",
+            "bbo",
+            "--start",
+            "2026-06-12T18:00:00Z",
+            "--end",
+            "2026-06-12T19:00:00Z",
+            "--out",
+            "ticks_bbo.csv",
+        ]
+    )
+
+    assert args.start == "2026-06-12T18:00:00Z"
+    assert args.end == "2026-06-12T19:00:00Z"
 
 
 @pytest.mark.asyncio
@@ -94,6 +119,7 @@ async def test_export_market_ticks_csv_without_channel_omits_channel_filter(tmp_
     )
 
     assert "raw_payload->>'channel'" not in str(session.query)
+    assert "COALESCE(exchange_ts, receive_ts)" not in str(session.query)
     assert session.params == {"venue": "hyperliquid", "symbols": ["BTC", "ETH"]}
 
 
@@ -123,10 +149,92 @@ async def test_export_market_ticks_csv_filters_by_channel(tmp_path: Path, channe
     query_text = str(session.query)
     assert "raw_payload->>'channel' = :channel" in query_text
     assert ":channel IS NULL" not in query_text
+    assert "COALESCE(exchange_ts, receive_ts)" not in query_text
     assert session.params == {
         "venue": "hyperliquid",
         "symbols": ["BTC", "ETH"],
         "channel": channel,
+    }
+
+
+@pytest.mark.asyncio
+async def test_export_market_ticks_csv_filters_by_start_only(tmp_path: Path) -> None:
+    session = FakeSession()
+    start = datetime(2026, 6, 12, 18, 0, tzinfo=timezone.utc)
+
+    await export_market_ticks_csv(
+        session,  # type: ignore[arg-type]
+        venue="hyperliquid",
+        symbols=["BTC"],
+        channel="bbo",
+        start=start,
+        out=tmp_path / "ticks_bbo.csv",
+    )
+
+    query_text = str(session.query)
+    assert "COALESCE(exchange_ts, receive_ts) >= :start_ts" in query_text
+    assert "COALESCE(exchange_ts, receive_ts) < :end_ts" not in query_text
+    assert "IS NULL" not in query_text
+    assert session.params == {
+        "venue": "hyperliquid",
+        "symbols": ["BTC"],
+        "channel": "bbo",
+        "start_ts": start,
+    }
+
+
+@pytest.mark.asyncio
+async def test_export_market_ticks_csv_filters_by_end_only(tmp_path: Path) -> None:
+    session = FakeSession()
+    end = datetime(2026, 6, 12, 19, 0, tzinfo=timezone.utc)
+
+    await export_market_ticks_csv(
+        session,  # type: ignore[arg-type]
+        venue="hyperliquid",
+        symbols=["BTC"],
+        channel="bbo",
+        end=end,
+        out=tmp_path / "ticks_bbo.csv",
+    )
+
+    query_text = str(session.query)
+    assert "COALESCE(exchange_ts, receive_ts) >= :start_ts" not in query_text
+    assert "COALESCE(exchange_ts, receive_ts) < :end_ts" in query_text
+    assert "IS NULL" not in query_text
+    assert session.params == {
+        "venue": "hyperliquid",
+        "symbols": ["BTC"],
+        "channel": "bbo",
+        "end_ts": end,
+    }
+
+
+@pytest.mark.asyncio
+async def test_export_market_ticks_csv_filters_by_start_and_end(tmp_path: Path) -> None:
+    session = FakeSession()
+    start = datetime(2026, 6, 12, 18, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 12, 19, 0, tzinfo=timezone.utc)
+
+    await export_market_ticks_csv(
+        session,  # type: ignore[arg-type]
+        venue="hyperliquid",
+        symbols=["BTC"],
+        channel="bbo",
+        start=start,
+        end=end,
+        out=tmp_path / "ticks_bbo.csv",
+    )
+
+    query_text = str(session.query)
+    assert "COALESCE(exchange_ts, receive_ts) >= :start_ts" in query_text
+    assert "COALESCE(exchange_ts, receive_ts) < :end_ts" in query_text
+    assert "IS NULL" not in query_text
+    assert session.params == {
+        "venue": "hyperliquid",
+        "symbols": ["BTC"],
+        "channel": "bbo",
+        "start_ts": start,
+        "end_ts": end,
     }
 
 
@@ -147,3 +255,14 @@ def test_cme_csv_loader(tmp_path) -> None:
     assert events[0].bid_price == Decimal("108.10")
     assert events[0].ask_price == Decimal("108.12")
     assert events[0].last_price == Decimal("108.11")
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.query: object | None = None
+        self.params: dict[str, object] | None = None
+
+    async def execute(self, query, params):
+        self.query = query
+        self.params = params
+        return []

@@ -212,6 +212,28 @@ Batch-run low-frequency event studies from a YAML event list:
 python -m yield_lag_bot.jobs.run_event_batch --config examples/events/central_bank_events.example.yaml
 ```
 
+For local Windows research runs, keep real configs under the data root rather than the repo:
+
+```text
+E:\QuantData\yield-lag\experiments\central_bank_events.yaml
+```
+
+Preview windows and all expected input/output paths without downloading data or writing reports:
+
+```powershell
+python -m yield_lag_bot.jobs.run_event_batch `
+  --config E:\QuantData\yield-lag\experiments\central_bank_events.yaml `
+  --dry-run
+```
+
+Reuse existing non-empty CME CSVs and Hyperliquid candle CSVs when rerunning the same event windows:
+
+```powershell
+python -m yield_lag_bot.jobs.run_event_batch `
+  --config E:\QuantData\yield-lag\experiments\central_bank_events.yaml `
+  --reuse-existing
+```
+
 Each event computes `start = event_time_utc - pre_minutes` and `end = event_time_utc + post_minutes`, downloads Databento CME CSVs for each CME symbol, downloads Hyperliquid public candles for each crypto symbol, then runs the M3E event study for every CME/crypto pair.
 
 Per-pair detailed and summary reports are written under:
@@ -227,6 +249,38 @@ The aggregate batch summary is:
 ```
 
 If one symbol or pair fails, the batch writes failed per-pair detail/summary CSVs, records a failed aggregate row, and continues the remaining pairs. M3G is historical research orchestration only. It does not add trading, private APIs, Hyperliquid exchange endpoints, CME live streaming, or order placement.
+
+## M3H Event Result Analyzer
+
+Rank promising CME -> crypto transmission candidates from the M3G aggregate summary:
+
+```powershell
+python -m yield_lag_bot.jobs.analyze_event_results `
+  --summary E:\QuantData\yield-lag\reports\events\summary.csv `
+  --out E:\QuantData\yield-lag\reports\events\ranked_summary.csv `
+  --markdown E:\QuantData\yield-lag\reports\events\research_notes.md
+```
+
+By default, M3H keeps only rows with `status=ok`, `quality_status` of `ok` or `warning`,
+at least 60 samples, and at least 10 nonzero CME return observations. Adjust the CME movement
+filter with:
+
+```powershell
+python -m yield_lag_bot.jobs.analyze_event_results `
+  --summary E:\QuantData\yield-lag\reports\events\summary.csv `
+  --out E:\QuantData\yield-lag\reports\events\ranked_summary.csv `
+  --markdown E:\QuantData\yield-lag\reports\events\research_notes.md `
+  --min-cme-nonzero-return-count 20
+```
+
+The ranked CSV adds `abs_correlation_1m/3m/5m`, `best_horizon`, `best_abs_correlation`,
+`best_direction_hit_rate`, `signal_direction`, and `candidate_score`. The score is transparent:
+stronger absolute correlation, direction hit rate farther from 50%, and more nonzero CME movement
+rank higher. The markdown notes summarize top candidates, weak/no-signal rows, insufficient-data
+warnings, and suggested next windows to test.
+
+M3H is analysis of historical local reports only. It does not download data, connect to a CME live
+stream, call Hyperliquid exchange/private endpoints, place orders, or enable live trading.
 
 ## M3C Experiment Runner
 

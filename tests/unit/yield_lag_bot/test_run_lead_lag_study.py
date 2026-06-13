@@ -54,15 +54,15 @@ def test_unified_lead_lag_study_output_file_is_created(tmp_path) -> None:
     cme_path.write_text(
         "timestamp,symbol,bid_price,ask_price,last_price\n"
         "2024-01-01T00:00:00.000Z,ZN,108.100,108.110,108.105\n"
-        "2024-01-01T00:00:00.100Z,ZN,108.120,108.130,108.125\n"
-        "2024-01-01T00:00:00.200Z,ZN,108.115,108.125,108.120\n",
+        "2024-01-01T00:00:30.000Z,ZN,108.120,108.130,108.125\n"
+        "2024-01-01T00:01:01.000Z,ZN,108.115,108.125,108.120\n",
         encoding="utf-8",
     )
     crypto_path.write_text(
         "symbol,receive_ts,bid_price,ask_price,last_price,mid_price\n"
         "BTC,2024-01-01T00:00:00.000Z,42000,42001,,42000.5\n"
-        "BTC,2024-01-01T00:00:00.100Z,42008,42010,,42009\n"
-        "BTC,2024-01-01T00:00:00.200Z,42004,42006,,42005\n",
+        "BTC,2024-01-01T00:00:30.000Z,42008,42010,,42009\n"
+        "BTC,2024-01-01T00:01:01.000Z,42004,42006,,42005\n",
         encoding="utf-8",
     )
 
@@ -77,23 +77,26 @@ def test_unified_lead_lag_study_output_file_is_created(tmp_path) -> None:
     report = pd.read_csv(out_path)
     assert out_path.exists()
     assert not report.empty
-    assert set(report["window_ms"]) == {100}
+    assert "status" not in report.columns
+    assert 100 in set(report["window_ms"])
     assert set(report["cme_symbol"]) == {"ZN"}
     assert set(report["crypto_symbol"]) == {"BTC"}
 
 
-def test_unified_lead_lag_study_empty_input_does_not_crash(tmp_path) -> None:
+def test_unified_lead_lag_study_non_overlapping_input_writes_failed_status(tmp_path) -> None:
     cme_path = tmp_path / "cme.csv"
     crypto_path = tmp_path / "ticks_bbo.csv"
     out_path = tmp_path / "lead_lag_study.csv"
     cme_path.write_text(
         "timestamp,symbol,bid_price,ask_price,last_price\n"
-        "2024-01-01T00:00:00Z,ZN,,,\n",
+        "2026-06-12T11:20:00Z,ZN,108.100,108.110,108.105\n"
+        "2026-06-12T11:30:00Z,ZN,108.120,108.130,108.125\n",
         encoding="utf-8",
     )
     crypto_path.write_text(
         "symbol,receive_ts,bid_price,ask_price,last_price,mid_price\n"
-        "BTC,2024-01-01T00:00:00Z,,,,\n",
+        "BTC,2026-06-12T18:02:00Z,42000,42001,,42000.5\n"
+        "BTC,2026-06-12T18:03:00Z,42008,42010,,42009\n",
         encoding="utf-8",
     )
 
@@ -106,4 +109,83 @@ def test_unified_lead_lag_study_empty_input_does_not_crash(tmp_path) -> None:
     )
 
     report = pd.read_csv(out_path)
-    assert report.empty
+    assert report.to_dict("records") == [
+        {
+            "status": "failed",
+            "error_message": "no overlapping time range between CME and crypto data",
+            "cme_symbol": "ZN",
+            "crypto_symbol": "BTC",
+            "cme_start": "2026-06-12T11:20:00+00:00",
+            "cme_end": "2026-06-12T11:30:00+00:00",
+            "crypto_start": "2026-06-12T18:02:00+00:00",
+            "crypto_end": "2026-06-12T18:03:00+00:00",
+            "overlap_seconds": -23520.0,
+        }
+    ]
+
+
+def test_unified_lead_lag_study_short_overlap_writes_failed_status(tmp_path) -> None:
+    cme_path = tmp_path / "cme.csv"
+    crypto_path = tmp_path / "ticks_bbo.csv"
+    out_path = tmp_path / "lead_lag_study.csv"
+    cme_path.write_text(
+        "timestamp,symbol,bid_price,ask_price,last_price\n"
+        "2024-01-01T00:00:00Z,ZN,108.100,108.110,108.105\n"
+        "2024-01-01T00:00:30Z,ZN,108.120,108.130,108.125\n",
+        encoding="utf-8",
+    )
+    crypto_path.write_text(
+        "symbol,receive_ts,bid_price,ask_price,last_price,mid_price\n"
+        "BTC,2024-01-01T00:00:00Z,42000,42001,,42000.5\n"
+        "BTC,2024-01-01T00:00:30Z,42008,42010,,42009\n",
+        encoding="utf-8",
+    )
+
+    run_study(
+        cme_csv=cme_path,
+        crypto_csv=crypto_path,
+        out=out_path,
+        cme_symbol="ZN",
+        crypto_symbol="BTC",
+    )
+
+    report = pd.read_csv(out_path)
+    row = report.iloc[0]
+    assert row["status"] == "failed"
+    assert row["error_message"] == "insufficient overlapping time range"
+    assert row["overlap_seconds"] == 30.0
+
+
+def test_unified_lead_lag_study_empty_input_does_not_crash(tmp_path) -> None:
+    cme_path = tmp_path / "cme.csv"
+    crypto_path = tmp_path / "ticks_bbo.csv"
+    out_path = tmp_path / "lead_lag_study.csv"
+    cme_path.write_text(
+        "timestamp,symbol,bid_price,ask_price,last_price\n",
+        encoding="utf-8",
+    )
+    crypto_path.write_text(
+        "symbol,receive_ts,bid_price,ask_price,last_price,mid_price\n",
+        encoding="utf-8",
+    )
+
+    run_study(
+        cme_csv=cme_path,
+        crypto_csv=crypto_path,
+        out=out_path,
+        cme_symbol="ZN",
+        crypto_symbol="BTC",
+    )
+
+    report = pd.read_csv(out_path)
+    assert len(report) == 1
+    row = report.iloc[0]
+    assert row["status"] == "failed"
+    assert row["error_message"] == "insufficient timestamp data for overlap validation"
+    assert row["cme_symbol"] == "ZN"
+    assert row["crypto_symbol"] == "BTC"
+    assert pd.isna(row["cme_start"])
+    assert pd.isna(row["cme_end"])
+    assert pd.isna(row["crypto_start"])
+    assert pd.isna(row["crypto_end"])
+    assert row["overlap_seconds"] == 0.0
