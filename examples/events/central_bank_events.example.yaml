@@ -1,0 +1,10 @@
+events:
+  - event_name: fomc_example
+    event_time_utc: "2026-06-17T18:00:00Z"
+    pre_minutes: 60
+    post_minutes: 120
+    cme_symbols: ["ZNM6", "ZNU6"]
+    crypto_symbols: ["BTC", "ETH"]
+    cme_dataset: "GLBX.MDP3"
+    cme_schema: "mbp-1"
+    crypto_interval: "1m"

@@ -99,6 +99,48 @@ Export BBO-only Hyperliquid ticks for price research:
 python -m yield_lag_bot.jobs.export_ticks --venue hyperliquid --symbols BTC,ETH --channel bbo --out ticks_bbo.csv
 ```
 
+Export BBO-only Hyperliquid ticks for a UTC time range:
+
+```bash
+python -m yield_lag_bot.jobs.export_ticks --venue hyperliquid --symbols BTC,ETH --channel bbo --start 2026-06-12T18:00:00Z --end 2026-06-12T19:00:00Z --out ticks_bbo.csv
+```
+
+## M3F Local Data Lake
+
+Postgres is the hot store for recently collected public market data. Archived CSV files are the cold store for historical research windows that should live outside the repo and be easy to copy to a server later.
+
+Set the archive root locally on Windows:
+
+```powershell
+$env:YIELD_LAG_DATA_ROOT="E:\QuantData\yield-lag"
+```
+
+Set the archive root on Linux/server:
+
+```bash
+export YIELD_LAG_DATA_ROOT=/data/yield-lag
+```
+
+Archive Hyperliquid public BBO rows from Postgres into the local data lake:
+
+```bash
+python -m yield_lag_bot.jobs.archive_hyperliquid_bbo --symbols BTC,ETH --start 2026-06-12T18:00:00Z --end 2026-06-12T19:00:00Z
+```
+
+The archive job writes files under:
+
+```text
+<YIELD_LAG_DATA_ROOT>/hyperliquid/bbo/hourly/YYYY/MM/DD/
+```
+
+It also appends a manifest row to:
+
+```text
+<YIELD_LAG_DATA_ROOT>/manifests/hyperliquid_bbo_manifest.csv
+```
+
+Do not commit archived data files to Git. Move or sync the cold-store directory to a server, then set `YIELD_LAG_DATA_ROOT` to that server path before running research jobs or future archival commands.
+
 ## M3B Databento Historical CME Import
 
 Install the optional Databento dependency and set the historical data API key from the environment:
@@ -123,6 +165,68 @@ python -m yield_lag_bot.jobs.run_lead_lag_study --cme-csv cme_ticks.csv --crypto
 ```
 
 This is historical research only. There is no CME live stream, Hyperliquid private API, or order placement in M3B. Keep `YIELD_LAG_LIVE_TRADING=false`.
+
+## M3D Overlap-Safe Lead-Lag Study
+
+Run the lead-lag study after confirming the CME and Hyperliquid BBO files cover the same time window:
+
+```bash
+python -m yield_lag_bot.jobs.run_lead_lag_study --cme-csv cme_ticks.csv --crypto-csv ticks_bbo.csv --out lead_lag_study.csv --cme-symbol ZNM6 --crypto-symbol BTC
+```
+
+The runner now validates source time ranges before computing metrics. If the CME and crypto files do not overlap, or if the overlap is less than 60 seconds, it writes a one-row failed CSV instead of normal lead-lag metrics. The failed CSV includes `status,error_message,cme_symbol,crypto_symbol,cme_start,cme_end,crypto_start,crypto_end,overlap_seconds`.
+
+This is research validation only. It does not download data, call private APIs, place orders, or run an execution backtest. Keep `YIELD_LAG_LIVE_TRADING=false`.
+
+## M3E Historical Event Study
+
+Download public Hyperliquid candles for the crypto leg:
+
+```bash
+python -m yield_lag_bot.jobs.download_hyperliquid_candles --coin BTC --interval 1m --start 2026-06-12T13:00:00Z --end 2026-06-12T14:00:00Z --out crypto_candles.csv
+```
+
+The candle CSV columns are `timestamp,symbol,open,high,low,close,volume,price`, where `price` is the candle close.
+
+Run the historical CME-vs-crypto event study:
+
+```bash
+python -m yield_lag_bot.jobs.run_event_study --cme-csv cme_ticks.csv --crypto-csv crypto_candles.csv --out event_study.csv --cme-symbol ZNM6 --crypto-symbol BTC
+```
+
+Write a compact one-row summary alongside the detailed minute-level report:
+
+```bash
+python -m yield_lag_bot.jobs.run_event_study --cme-csv cme_ticks.csv --crypto-csv crypto_candles.csv --out event_study.csv --summary-out event_study_summary.csv --cme-symbol ZNM6 --crypto-symbol BTC
+```
+
+The event study aligns CME mid prices and crypto candle prices to 1-minute timestamps, then reports CME returns, 1/3/5-minute crypto forward returns, `correlation_1m/3m/5m`, and `direction_hit_rate_1m/3m/5m`. The detailed CSV keeps those metrics on each minute row for backward compatibility. The optional summary CSV writes one row with counts, mean/max absolute movement, per-horizon correlations, per-horizon hit rates, and `quality_status` values of `ok`, `insufficient_data`, `low_cme_movement`, or `no_overlap`. If the input ranges do not overlap or there are too few aligned rows, it writes a failed status report instead of crashing. Constant-price samples are marked `low_movement` in the detailed report.
+
+M3E is historical research only, not an execution backtest. It does not add CME live streaming, Hyperliquid exchange/private endpoints, private keys, or order placement. Keep `YIELD_LAG_LIVE_TRADING=false`.
+
+## M3G Batch Historical Event Studies
+
+Batch-run low-frequency event studies from a YAML event list:
+
+```bash
+python -m yield_lag_bot.jobs.run_event_batch --config examples/events/central_bank_events.example.yaml
+```
+
+Each event computes `start = event_time_utc - pre_minutes` and `end = event_time_utc + post_minutes`, downloads Databento CME CSVs for each CME symbol, downloads Hyperliquid public candles for each crypto symbol, then runs the M3E event study for every CME/crypto pair.
+
+Per-pair detailed and summary reports are written under:
+
+```text
+<YIELD_LAG_DATA_ROOT>/reports/events/<event_name>/
+```
+
+The aggregate batch summary is:
+
+```text
+<YIELD_LAG_DATA_ROOT>/reports/events/summary.csv
+```
+
+If one symbol or pair fails, the batch writes failed per-pair detail/summary CSVs, records a failed aggregate row, and continues the remaining pairs. M3G is historical research orchestration only. It does not add trading, private APIs, Hyperliquid exchange endpoints, CME live streaming, or order placement.
 
 ## M3C Experiment Runner
 
