@@ -312,6 +312,37 @@ warnings, and suggested next windows to test.
 M3H is analysis of historical local reports only. It does not download data, connect to a CME live
 stream, call Hyperliquid exchange/private endpoints, place orders, or enable live trading.
 
+## M4 Offline Paper Signal Replay
+
+Replay robust M3H/M3J candidates against their local M3G event-detail CSVs:
+
+```powershell
+python -m yield_lag_bot.jobs.run_paper_signal_replay `
+  --summary E:\QuantData\yield-lag\reports\events\cross_date_ranked_summary.csv `
+  --out E:\QuantData\yield-lag\reports\paper\paper_signal_replay.csv `
+  --report E:\QuantData\yield-lag\reports\paper\paper_signal_report.md
+```
+
+M4 keeps only strong ETH inverse 1-minute candidates for `ZNU6`, `ZTU6`, and `ZNM6`. It reads
+`result_path` detail CSVs, forms a paper signal from the completed CME minute return at time `t`,
+and applies the ETH forward return from `t` to `t+1`. The default CME movement threshold is
+`0.5` bps, default paper notional is `100` USDT, default round-trip cost is `6` bps, and default
+cooldown is `1` minute:
+
+```powershell
+python -m yield_lag_bot.jobs.run_paper_signal_replay `
+  --summary E:\QuantData\yield-lag\reports\events\cross_date_ranked_summary.csv `
+  --out E:\QuantData\yield-lag\reports\paper\paper_signal_replay.csv `
+  --report E:\QuantData\yield-lag\reports\paper\paper_signal_report.md `
+  --min-cme-return-bps 0.5 `
+  --notional 100 `
+  --round-trip-cost-bps 6 `
+  --cooldown-minutes 1
+```
+
+M4 is offline replay/backtest plumbing only. It does not use a wallet, call Hyperliquid private or
+exchange endpoints, place orders, connect to a CME live stream, or enable live trading.
+
 ## M3C Experiment Runner
 
 Run a repeatable CME Treasury futures vs Hyperliquid BBO lead-lag experiment from YAML:
