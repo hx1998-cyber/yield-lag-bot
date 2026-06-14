@@ -139,6 +139,65 @@ def test_empty_candidate_input_writes_clear_report(tmp_path) -> None:
     assert "Offline replay only" in (tmp_path / "report.md").read_text(encoding="utf-8")
 
 
+def test_audit_columns_generated(tmp_path) -> None:
+    detail_path = tmp_path / "detail.csv"
+    summary_path = tmp_path / "summary.csv"
+    audit_path = tmp_path / "audit.csv"
+    _write_detail(
+        detail_path,
+        [
+            {"timestamp": "2026-06-12T12:01:00Z", "cme": -1.0, "eth": 10.0},
+            {"timestamp": "2026-06-12T12:02:00Z", "cme": 0.1, "eth": 10.0},
+        ],
+    )
+    _write_summary(summary_path, detail_path)
+
+    run_paper_signal_replay(
+        summary=summary_path,
+        out=tmp_path / "replay.csv",
+        report=tmp_path / "report.md",
+        audit_out=audit_path,
+    )
+
+    audit = pd.read_csv(audit_path)
+    assert {
+        "cme_timestamp_used",
+        "eth_return_start_time",
+        "eth_return_end_time",
+        "gross_win",
+        "net_win",
+        "reason_included",
+        "reason_excluded",
+    }.issubset(audit.columns)
+    assert set(audit["reason_excluded"].fillna("")) == {"", "below_threshold"}
+
+
+def test_orientation_check_reports_inverse_mapping(tmp_path) -> None:
+    detail_path = tmp_path / "detail.csv"
+    summary_path = tmp_path / "summary.csv"
+    _write_detail(
+        detail_path,
+        [
+            {"timestamp": "2026-06-12T12:01:00Z", "cme": 1.0, "eth": -10.0},
+            {"timestamp": "2026-06-12T12:02:00Z", "cme": -1.0, "eth": 10.0},
+        ],
+    )
+    _write_summary(summary_path, detail_path)
+
+    run_paper_signal_replay(
+        summary=summary_path,
+        out=tmp_path / "replay.csv",
+        report=tmp_path / "report.md",
+        orientation_check=True,
+        round_trip_cost_bps=0,
+    )
+
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "CME up -> ETH short: ok" in report
+    assert "CME down -> ETH long: ok" in report
+    assert "sign convention is internally consistent" in report
+
+
 def _write_detail(path, rows: list[dict[str, object]]) -> None:
     pd.DataFrame(
         [
