@@ -19,6 +19,7 @@ RANKING_COLUMNS = [
     "best_direction_hit_rate",
     "directional_edge",
     "aligned_direction_hit_rate",
+    "direction_consistent",
     "signal_direction",
     "candidate_tier",
     "candidate_score",
@@ -158,6 +159,7 @@ def _add_ranking_columns(frame: pd.DataFrame) -> pd.DataFrame:
     best_hit_rates: list[float] = []
     directional_edges: list[float] = []
     aligned_hit_rates: list[float] = []
+    direction_consistent_values: list[bool] = []
     signal_directions: list[str] = []
     candidate_tiers: list[str] = []
     candidate_scores: list[float] = []
@@ -166,20 +168,24 @@ def _add_ranking_columns(frame: pd.DataFrame) -> pd.DataFrame:
         best_horizon, best_correlation, best_abs_correlation = _best_correlation(row)
         best_hit_rate = _numeric_value(row.get(f"direction_hit_rate_{best_horizon}", float("nan")))
         directional_edge = abs(best_hit_rate - 0.5) if pd.notna(best_hit_rate) else 0.0
-        hit_edge = directional_edge * 2
         nonzero_count = _numeric_value(row.get("cme_nonzero_return_count", 0.0))
         movement_score = min(max(nonzero_count, 0.0) / 120.0, 1.0)
-        candidate_score = (best_abs_correlation * 70.0) + (hit_edge * 20.0) + (movement_score * 10.0)
         signal_direction = _signal_direction(best_correlation)
         aligned_hit_rate = _aligned_direction_hit_rate(best_hit_rate, signal_direction)
+        direction_consistent = bool(pd.notna(aligned_hit_rate) and aligned_hit_rate >= 0.5)
+        directional_consistency = max(aligned_hit_rate - 0.5, 0.0) if pd.notna(aligned_hit_rate) else 0.0
+        candidate_score = (best_abs_correlation * 70.0) + (directional_consistency * 40.0) + (
+            movement_score * 10.0
+        )
 
         best_horizons.append(best_horizon)
         best_abs_correlations.append(best_abs_correlation)
         best_hit_rates.append(best_hit_rate)
         directional_edges.append(directional_edge)
         aligned_hit_rates.append(aligned_hit_rate)
+        direction_consistent_values.append(direction_consistent)
         signal_directions.append(signal_direction)
-        candidate_tiers.append(_candidate_tier(best_abs_correlation, aligned_hit_rate))
+        candidate_tiers.append(_candidate_tier(best_abs_correlation, aligned_hit_rate, direction_consistent))
         candidate_scores.append(round(candidate_score, 6))
 
     ranked["best_horizon"] = best_horizons
@@ -187,6 +193,7 @@ def _add_ranking_columns(frame: pd.DataFrame) -> pd.DataFrame:
     ranked["best_direction_hit_rate"] = best_hit_rates
     ranked["directional_edge"] = directional_edges
     ranked["aligned_direction_hit_rate"] = aligned_hit_rates
+    ranked["direction_consistent"] = direction_consistent_values
     ranked["signal_direction"] = signal_directions
     ranked["candidate_tier"] = candidate_tiers
     ranked["candidate_score"] = candidate_scores
@@ -201,8 +208,12 @@ def _aligned_direction_hit_rate(best_hit_rate: float, signal_direction: str) -> 
     return best_hit_rate
 
 
-def _candidate_tier(best_abs_correlation: float, aligned_direction_hit_rate: float) -> str:
-    if pd.isna(best_abs_correlation) or pd.isna(aligned_direction_hit_rate):
+def _candidate_tier(
+    best_abs_correlation: float,
+    aligned_direction_hit_rate: float,
+    direction_consistent: bool,
+) -> str:
+    if not direction_consistent or pd.isna(best_abs_correlation) or pd.isna(aligned_direction_hit_rate):
         return "weak"
     if best_abs_correlation >= 0.25 and aligned_direction_hit_rate >= 0.60:
         return "strong_candidate"
@@ -321,8 +332,10 @@ def _research_notes(
         f"Ranked output: `{ranked_path}`",
         "",
         "Candidate score = 70 * best absolute correlation + "
-        "20 * abs(direction hit rate - 0.5) * 2 + "
+        "40 * max(aligned_direction_hit_rate - 0.5, 0) + "
         "10 * min(cme_nonzero_return_count / 120, 1).",
+        "Rows with high absolute correlation but aligned_direction_hit_rate < 0.5 are treated as weak "
+        "because their direction is inconsistent.",
         f"Filters: status `ok`, quality_status `ok` or `warning`, sample_count >= {min_sample_count}, "
         f"cme_nonzero_return_count >= {min_cme_nonzero_return_count}.",
         "",
@@ -330,6 +343,8 @@ def _research_notes(
         "",
     ]
     lines.extend(_markdown_table(_top_candidate_rows(ranked)))
+    lines.extend(["", "## Direction Inconsistent Rows", ""])
+    lines.extend(_markdown_table(_direction_inconsistent_rows(ranked)))
     lines.extend(["", "## Weak Or No-Signal Windows", ""])
     lines.extend(
         _markdown_table(
@@ -381,6 +396,15 @@ def _top_candidate_rows(ranked: pd.DataFrame) -> pd.DataFrame:
     if ranked.empty:
         return pd.DataFrame()
     return ranked.head(10)[_note_columns(ranked)]
+
+
+def _direction_inconsistent_rows(ranked: pd.DataFrame) -> pd.DataFrame:
+    if ranked.empty or "direction_consistent" not in ranked.columns:
+        return pd.DataFrame()
+    rows = ranked[~ranked["direction_consistent"].astype(bool)]
+    if rows.empty:
+        return pd.DataFrame()
+    return rows.sort_values("best_abs_correlation", ascending=False).head(10)[_note_columns(rows)]
 
 
 def _weak_rows(
@@ -496,6 +520,7 @@ def _note_columns(frame: pd.DataFrame) -> list[str]:
         "best_direction_hit_rate",
         "directional_edge",
         "aligned_direction_hit_rate",
+        "direction_consistent",
         "signal_direction",
         "candidate_tier",
         "candidate_score",

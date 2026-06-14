@@ -177,6 +177,87 @@ def test_analyzer_pair_summary_output(tmp_path) -> None:
     assert inverse["watchlist_count"] == 0
 
 
+def test_analyzer_positive_hit_rate_below_half_is_direction_inconsistent_and_weak(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    pd.DataFrame(
+        [
+            _row(
+                event_name="positive_inconsistent",
+                correlation_1m=0.30,
+                correlation_3m=0.10,
+                correlation_5m=0.05,
+                direction_hit_rate_1m=0.30,
+                cme_nonzero_return_count=30,
+            )
+        ]
+    ).to_csv(summary_path, index=False)
+
+    ranked = analyze_event_results(summary=summary_path, out=ranked_path, markdown=notes_path)
+    row = ranked.iloc[0]
+
+    assert row["signal_direction"] == "positive"
+    assert row["aligned_direction_hit_rate"] == 0.30
+    assert row["direction_consistent"] == False
+    assert row["candidate_tier"] == "weak"
+    assert "Direction Inconsistent Rows" in notes_path.read_text(encoding="utf-8")
+    assert "aligned_direction_hit_rate < 0.5" in notes_path.read_text(encoding="utf-8")
+
+
+def test_analyzer_inverse_hit_rate_below_half_can_be_candidate(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    pd.DataFrame(
+        [
+            _row(
+                event_name="inverse_consistent",
+                correlation_1m=-0.30,
+                correlation_3m=-0.10,
+                correlation_5m=-0.05,
+                direction_hit_rate_1m=0.30,
+                cme_nonzero_return_count=30,
+            )
+        ]
+    ).to_csv(summary_path, index=False)
+
+    ranked = analyze_event_results(summary=summary_path, out=ranked_path, markdown=notes_path)
+    row = ranked.iloc[0]
+
+    assert row["signal_direction"] == "inverse"
+    assert row["aligned_direction_hit_rate"] == 0.70
+    assert row["direction_consistent"] == True
+    assert row["candidate_tier"] == "strong_candidate"
+
+
+def test_analyzer_score_is_lower_for_direction_inconsistent_rows(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    pd.DataFrame(
+        [
+            _row(
+                event_name="positive_inconsistent",
+                correlation_1m=0.30,
+                direction_hit_rate_1m=0.30,
+                cme_nonzero_return_count=30,
+            ),
+            _row(
+                event_name="inverse_consistent",
+                correlation_1m=-0.30,
+                direction_hit_rate_1m=0.30,
+                cme_nonzero_return_count=30,
+            ),
+        ]
+    ).to_csv(summary_path, index=False)
+
+    ranked = analyze_event_results(summary=summary_path, out=ranked_path, markdown=notes_path)
+    scores = dict(zip(ranked["event_name"], ranked["candidate_score"], strict=True))
+
+    assert scores["positive_inconsistent"] < scores["inverse_consistent"]
+
+
 def _write_summary(path) -> None:
     rows = [
         _row(

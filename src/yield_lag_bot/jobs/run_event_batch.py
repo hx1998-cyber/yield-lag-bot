@@ -72,9 +72,11 @@ class EventBatchPlan:
     cme_paths: dict[str, Path]
     cme_cache_paths: dict[str, Path]
     cme_cache_matches: dict[str, Path | None]
+    cme_covering_cache_matches: dict[str, Path | None]
     crypto_paths: dict[str, Path]
     crypto_cache_paths: dict[str, Path]
     crypto_cache_matches: dict[str, Path | None]
+    crypto_covering_cache_matches: dict[str, Path | None]
     pair_paths: dict[tuple[str, str], tuple[Path, Path]]
     cme_large_download_blocked: bool
     cme_large_download_message: str
@@ -192,6 +194,25 @@ def _run_event(
                 central_cache_path = plan.cme_cache_matches[cme_symbol]
                 print(f"Reusing central cache: {central_cache_path}")
                 _copy_to_event_path(central_cache_path, path)
+            elif reuse_existing and plan.cme_covering_cache_matches[cme_symbol] is not None:
+                central_cache_path = plan.cme_covering_cache_matches[cme_symbol]
+                if _slice_csv_to_event_window(central_cache_path, path, start_iso=start_iso, end_iso=end_iso):
+                    print(f"Reusing covering central cache: {central_cache_path} -> {path}")
+                else:
+                    _raise_if_large_cme_download_blocked(
+                        plan=plan,
+                        allow_large_cme_download=allow_large_cme_download,
+                    )
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cme_download_func(
+                        dataset=event.cme_dataset,
+                        schema=event.cme_schema,
+                        symbols=[cme_symbol],
+                        start=start_iso,
+                        end=end_iso,
+                        out=cache_path,
+                    )
+                    _copy_to_event_path(cache_path, path)
             else:
                 _raise_if_large_cme_download_blocked(
                     plan=plan,
@@ -223,6 +244,20 @@ def _run_event(
                 central_cache_path = plan.crypto_cache_matches[crypto_symbol]
                 print(f"Reusing central cache: {central_cache_path}")
                 _copy_to_event_path(central_cache_path, path)
+            elif reuse_existing and plan.crypto_covering_cache_matches[crypto_symbol] is not None:
+                central_cache_path = plan.crypto_covering_cache_matches[crypto_symbol]
+                if _slice_csv_to_event_window(central_cache_path, path, start_iso=start_iso, end_iso=end_iso):
+                    print(f"Reusing covering central cache: {central_cache_path} -> {path}")
+                else:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    crypto_download_func(
+                        coin=crypto_symbol,
+                        interval=event.crypto_interval,
+                        start=start_iso,
+                        end=end_iso,
+                        out=cache_path,
+                    )
+                    _copy_to_event_path(cache_path, path)
             else:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 crypto_download_func(
@@ -306,6 +341,14 @@ def _build_event_plan(*, event: EventBatchItem, data_root: Path, events_root: Pa
         )
         for cme_symbol in event.cme_symbols
     }
+    cme_covering_cache_matches = {
+        cme_symbol: _find_covering_cache(
+            _cme_cache_dir(data_root, event.cme_schema).glob(f"cme_{_safe_token(cme_symbol)}*.csv"),
+            start=start,
+            end=end,
+        )
+        for cme_symbol in event.cme_symbols
+    }
     crypto_paths = {
         crypto_symbol: event_dir / f"{_safe_token(crypto_symbol)}__candles.csv"
         for crypto_symbol in event.crypto_symbols
@@ -321,6 +364,16 @@ def _build_event_plan(*, event: EventBatchItem, data_root: Path, events_root: Pa
                 f"{_safe_token(crypto_symbol)}*{_safe_token(event.crypto_interval)}*"
                 f"{start_token}_{end_token}.csv"
             )
+        )
+        for crypto_symbol in event.crypto_symbols
+    }
+    crypto_covering_cache_matches = {
+        crypto_symbol: _find_covering_cache(
+            _crypto_cache_dir(data_root).glob(
+                f"{_safe_token(crypto_symbol)}*{_safe_token(event.crypto_interval)}*.csv"
+            ),
+            start=start,
+            end=end,
         )
         for crypto_symbol in event.crypto_symbols
     }
@@ -341,9 +394,11 @@ def _build_event_plan(*, event: EventBatchItem, data_root: Path, events_root: Pa
         cme_paths=cme_paths,
         cme_cache_paths=cme_cache_paths,
         cme_cache_matches=cme_cache_matches,
+        cme_covering_cache_matches=cme_covering_cache_matches,
         crypto_paths=crypto_paths,
         crypto_cache_paths=crypto_cache_paths,
         crypto_cache_matches=crypto_cache_matches,
+        crypto_covering_cache_matches=crypto_covering_cache_matches,
         pair_paths=pair_paths,
         cme_large_download_blocked=_large_cme_download_blocked(event=event, start=start, end=end),
         cme_large_download_message=_large_cme_download_message(event=event, start=start, end=end),
@@ -374,10 +429,13 @@ def _print_dry_run(
         print("expected CME central cache paths:")
         for symbol, path in plan.cme_cache_paths.items():
             match = plan.cme_cache_matches[symbol]
+            covering_match = plan.cme_covering_cache_matches[symbol]
             exists = _is_nonempty_file(path) or match is not None
             print(f"  {symbol}: {path} exists={exists}")
             if match is not None and match != path:
                 print(f"  {symbol} matched central cache: {match}")
+            print(f"  {symbol} covering central cache: {covering_match or ''}")
+            print(f"  {symbol} would slice from covering cache: {covering_match is not None}")
         guard_blocked = plan.cme_large_download_blocked and not allow_large_cme_download
         print(f"large CME guard would block request: {guard_blocked}")
         if guard_blocked:
@@ -388,10 +446,13 @@ def _print_dry_run(
         print("expected Hyperliquid central cache paths:")
         for symbol, path in plan.crypto_cache_paths.items():
             match = plan.crypto_cache_matches[symbol]
+            covering_match = plan.crypto_covering_cache_matches[symbol]
             exists = _is_nonempty_file(path) or match is not None
             print(f"  {symbol}: {path} exists={exists}")
             if match is not None and match != path:
                 print(f"  {symbol} matched central cache: {match}")
+            print(f"  {symbol} covering central cache: {covering_match or ''}")
+            print(f"  {symbol} would slice from covering cache: {covering_match is not None}")
         print("expected event study output paths:")
         for (cme_symbol, crypto_symbol), (detail_path, summary_path) in plan.pair_paths.items():
             print(f"  {cme_symbol}->{crypto_symbol} detail: {detail_path}")
@@ -407,9 +468,68 @@ def _first_nonempty_match(paths) -> Path | None:
     return matches[0] if matches else None
 
 
+def _find_covering_cache(paths, *, start: pd.Timestamp, end: pd.Timestamp) -> Path | None:
+    requested_start = _ensure_utc(start)
+    requested_end = _ensure_utc(end)
+    matches: list[tuple[float, str, Path]] = []
+    for path in paths:
+        if not _is_nonempty_file(path):
+            continue
+        bounds = _parse_cache_bounds(path)
+        if bounds is None:
+            continue
+        cached_start, cached_end = bounds
+        if cached_start <= requested_start and cached_end >= requested_end:
+            span_seconds = (cached_end - cached_start).total_seconds()
+            matches.append((span_seconds, str(path), path))
+    if not matches:
+        return None
+    matches.sort()
+    return matches[0][2]
+
+
+def _parse_cache_bounds(path: Path) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    tokens = re.findall(r"\d{8}_\d{4}", path.stem)
+    if len(tokens) < 2:
+        return None
+    return _parse_cache_time_token(tokens[-2]), _parse_cache_time_token(tokens[-1])
+
+
+def _parse_cache_time_token(value: str) -> pd.Timestamp:
+    return pd.Timestamp(datetime.strptime(value, "%Y%m%d_%H%M"), tz=timezone.utc)
+
+
+def _ensure_utc(value: pd.Timestamp | datetime) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize(timezone.utc)
+    return timestamp.tz_convert(timezone.utc)
+
+
 def _copy_to_event_path(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
+
+
+def _slice_csv_to_event_window(source: Path, destination: Path, *, start_iso: str, end_iso: str) -> bool:
+    frame = pd.read_csv(source)
+    timestamp_column = _detect_timestamp_column(frame)
+    timestamps = pd.to_datetime(frame[timestamp_column], utc=True, errors="coerce")
+    start = pd.Timestamp(start_iso)
+    end = pd.Timestamp(end_iso)
+    sliced = frame[(timestamps >= start) & (timestamps < end)].copy()
+    if sliced.empty:
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    sliced.to_csv(destination, index=False)
+    return True
+
+
+def _detect_timestamp_column(frame: pd.DataFrame) -> str:
+    for column in ("timestamp", "exchange_ts", "ts", "datetime"):
+        if column in frame.columns:
+            return column
+    raise ValueError("CSV missing timestamp column; expected one of timestamp, exchange_ts, ts, datetime")
 
 
 def _cme_cache_dir(data_root: Path, schema: str) -> Path:
