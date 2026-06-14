@@ -89,6 +89,94 @@ def test_analyzer_handles_missing_summary_gracefully(tmp_path) -> None:
     assert "Source summary was not found" in notes_path.read_text(encoding="utf-8")
 
 
+def test_analyzer_min_sample_count_filter(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    _write_summary(summary_path)
+
+    ranked = analyze_event_results(
+        summary=summary_path,
+        out=ranked_path,
+        markdown=notes_path,
+        min_sample_count=100,
+    )
+
+    assert set(ranked["event_name"]) == {"fomc_hot", "fomc_inverse"}
+    assert "payrolls_warning" not in set(ranked["event_name"])
+    assert "sample_count below 100" in notes_path.read_text(encoding="utf-8")
+
+
+def test_analyzer_aligned_direction_hit_rate_for_inverse_rows(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    _write_summary(summary_path)
+
+    ranked = analyze_event_results(summary=summary_path, out=ranked_path, markdown=notes_path)
+    inverse = ranked[ranked["event_name"] == "fomc_inverse"].iloc[0]
+
+    assert inverse["signal_direction"] == "inverse"
+    assert inverse["best_direction_hit_rate"] == 0.36
+    assert inverse["directional_edge"] == 0.14
+    assert inverse["aligned_direction_hit_rate"] == 0.64
+
+
+def test_analyzer_candidate_tier_assignment(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    _write_summary(summary_path)
+
+    ranked = analyze_event_results(summary=summary_path, out=ranked_path, markdown=notes_path)
+    tiers = dict(zip(ranked["event_name"], ranked["candidate_tier"], strict=True))
+
+    assert tiers["fomc_hot"] == "strong_candidate"
+    assert tiers["fomc_inverse"] == "strong_candidate"
+    assert tiers["payrolls_warning"] == "weak"
+
+
+def test_analyzer_pair_summary_output(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    pair_summary_path = tmp_path / "pair_summary.csv"
+    _write_summary(summary_path)
+
+    analyze_event_results(
+        summary=summary_path,
+        out=ranked_path,
+        markdown=notes_path,
+        pair_summary_out=pair_summary_path,
+    )
+
+    pair_summary = pd.read_csv(pair_summary_path)
+    assert set(pair_summary.columns) == {
+        "cme_symbol",
+        "crypto_symbol",
+        "best_horizon",
+        "signal_direction",
+        "window_count",
+        "avg_best_abs_correlation",
+        "max_best_abs_correlation",
+        "avg_aligned_direction_hit_rate",
+        "avg_candidate_score",
+        "watchlist_count",
+        "strong_candidate_count",
+    }
+    inverse = pair_summary[
+        (pair_summary["cme_symbol"] == "ZFM6")
+        & (pair_summary["crypto_symbol"] == "ETH")
+        & (pair_summary["best_horizon"] == "5m")
+        & (pair_summary["signal_direction"] == "inverse")
+    ].iloc[0]
+    assert inverse["window_count"] == 1
+    assert inverse["avg_best_abs_correlation"] == 0.32
+    assert inverse["avg_aligned_direction_hit_rate"] == 0.64
+    assert inverse["strong_candidate_count"] == 1
+    assert inverse["watchlist_count"] == 0
+
+
 def _write_summary(path) -> None:
     rows = [
         _row(

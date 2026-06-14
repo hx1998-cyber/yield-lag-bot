@@ -17,7 +17,10 @@ RANKING_COLUMNS = [
     "best_horizon",
     "best_abs_correlation",
     "best_direction_hit_rate",
+    "directional_edge",
+    "aligned_direction_hit_rate",
     "signal_direction",
+    "candidate_tier",
     "candidate_score",
 ]
 
@@ -27,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--markdown", required=True)
+    parser.add_argument("--min-sample-count", type=int, default=MIN_SAMPLE_COUNT)
+    parser.add_argument("--pair-summary-out", default=None)
     parser.add_argument(
         "--min-cme-nonzero-return-count",
         type=int,
@@ -41,6 +46,8 @@ def main() -> None:
         summary=args.summary,
         out=args.out,
         markdown=args.markdown,
+        pair_summary_out=args.pair_summary_out,
+        min_sample_count=args.min_sample_count,
         min_cme_nonzero_return_count=args.min_cme_nonzero_return_count,
     )
 
@@ -50,6 +57,8 @@ def analyze_event_results(
     summary: str | Path,
     out: str | Path,
     markdown: str | Path,
+    pair_summary_out: str | Path | None = None,
+    min_sample_count: int = MIN_SAMPLE_COUNT,
     min_cme_nonzero_return_count: int = DEFAULT_MIN_CME_NONZERO_RETURN_COUNT,
 ) -> pd.DataFrame:
     summary_path = Path(summary)
@@ -57,26 +66,38 @@ def analyze_event_results(
     markdown_path = Path(markdown)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    pair_summary_path = Path(pair_summary_out) if pair_summary_out is not None else None
+    if pair_summary_path is not None:
+        pair_summary_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not summary_path.exists():
         ranked = _empty_ranked_frame()
         ranked.to_csv(out_path, index=False)
+        if pair_summary_path is not None:
+            _empty_pair_summary_frame().to_csv(pair_summary_path, index=False)
         markdown_path.write_text(
-            _missing_summary_notes(summary_path, min_cme_nonzero_return_count),
+            _missing_summary_notes(summary_path, min_sample_count, min_cme_nonzero_return_count),
             encoding="utf-8",
         )
         return ranked
 
     source = pd.read_csv(summary_path)
     source = _normalize_numeric_columns(source)
-    ranked = _rank_candidates(source, min_cme_nonzero_return_count=min_cme_nonzero_return_count)
+    ranked = _rank_candidates(
+        source,
+        min_sample_count=min_sample_count,
+        min_cme_nonzero_return_count=min_cme_nonzero_return_count,
+    )
     ranked.to_csv(out_path, index=False)
+    if pair_summary_path is not None:
+        _pair_summary(ranked).to_csv(pair_summary_path, index=False)
     markdown_path.write_text(
         _research_notes(
             source=source,
             ranked=ranked,
             summary_path=summary_path,
             ranked_path=out_path,
+            min_sample_count=min_sample_count,
             min_cme_nonzero_return_count=min_cme_nonzero_return_count,
         ),
         encoding="utf-8",
@@ -87,10 +108,12 @@ def analyze_event_results(
 def _rank_candidates(
     source: pd.DataFrame,
     *,
+    min_sample_count: int,
     min_cme_nonzero_return_count: int,
 ) -> pd.DataFrame:
     candidates = _eligible_rows(
         source,
+        min_sample_count=min_sample_count,
         min_cme_nonzero_return_count=min_cme_nonzero_return_count,
     ).copy()
     if candidates.empty:
@@ -107,6 +130,7 @@ def _rank_candidates(
 def _eligible_rows(
     source: pd.DataFrame,
     *,
+    min_sample_count: int = MIN_SAMPLE_COUNT,
     min_cme_nonzero_return_count: int,
 ) -> pd.DataFrame:
     if source.empty:
@@ -119,7 +143,7 @@ def _eligible_rows(
     return source[
         (status == "ok")
         & (quality.isin({"ok", "warning"}))
-        & (source["sample_count"] >= MIN_SAMPLE_COUNT)
+        & (source["sample_count"] >= min_sample_count)
         & (source["cme_nonzero_return_count"] >= min_cme_nonzero_return_count)
     ]
 
@@ -132,29 +156,59 @@ def _add_ranking_columns(frame: pd.DataFrame) -> pd.DataFrame:
     best_horizons: list[str] = []
     best_abs_correlations: list[float] = []
     best_hit_rates: list[float] = []
+    directional_edges: list[float] = []
+    aligned_hit_rates: list[float] = []
     signal_directions: list[str] = []
+    candidate_tiers: list[str] = []
     candidate_scores: list[float] = []
 
     for _, row in ranked.iterrows():
         best_horizon, best_correlation, best_abs_correlation = _best_correlation(row)
         best_hit_rate = _numeric_value(row.get(f"direction_hit_rate_{best_horizon}", float("nan")))
-        hit_edge = abs(best_hit_rate - 0.5) * 2 if pd.notna(best_hit_rate) else 0.0
+        directional_edge = abs(best_hit_rate - 0.5) if pd.notna(best_hit_rate) else 0.0
+        hit_edge = directional_edge * 2
         nonzero_count = _numeric_value(row.get("cme_nonzero_return_count", 0.0))
         movement_score = min(max(nonzero_count, 0.0) / 120.0, 1.0)
         candidate_score = (best_abs_correlation * 70.0) + (hit_edge * 20.0) + (movement_score * 10.0)
+        signal_direction = _signal_direction(best_correlation)
+        aligned_hit_rate = _aligned_direction_hit_rate(best_hit_rate, signal_direction)
 
         best_horizons.append(best_horizon)
         best_abs_correlations.append(best_abs_correlation)
         best_hit_rates.append(best_hit_rate)
-        signal_directions.append(_signal_direction(best_correlation))
+        directional_edges.append(directional_edge)
+        aligned_hit_rates.append(aligned_hit_rate)
+        signal_directions.append(signal_direction)
+        candidate_tiers.append(_candidate_tier(best_abs_correlation, aligned_hit_rate))
         candidate_scores.append(round(candidate_score, 6))
 
     ranked["best_horizon"] = best_horizons
     ranked["best_abs_correlation"] = best_abs_correlations
     ranked["best_direction_hit_rate"] = best_hit_rates
+    ranked["directional_edge"] = directional_edges
+    ranked["aligned_direction_hit_rate"] = aligned_hit_rates
     ranked["signal_direction"] = signal_directions
+    ranked["candidate_tier"] = candidate_tiers
     ranked["candidate_score"] = candidate_scores
     return ranked
+
+
+def _aligned_direction_hit_rate(best_hit_rate: float, signal_direction: str) -> float:
+    if pd.isna(best_hit_rate):
+        return float("nan")
+    if signal_direction == "inverse":
+        return 1.0 - best_hit_rate
+    return best_hit_rate
+
+
+def _candidate_tier(best_abs_correlation: float, aligned_direction_hit_rate: float) -> str:
+    if pd.isna(best_abs_correlation) or pd.isna(aligned_direction_hit_rate):
+        return "weak"
+    if best_abs_correlation >= 0.25 and aligned_direction_hit_rate >= 0.60:
+        return "strong_candidate"
+    if best_abs_correlation >= 0.12 and aligned_direction_hit_rate >= 0.60:
+        return "watchlist"
+    return "weak"
 
 
 def _best_correlation(row: pd.Series) -> tuple[str, float, float]:
@@ -211,12 +265,53 @@ def _empty_ranked_frame(source: pd.DataFrame | None = None) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
 
 
+def _pair_summary(ranked: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "cme_symbol",
+        "crypto_symbol",
+        "best_horizon",
+        "signal_direction",
+        "window_count",
+        "avg_best_abs_correlation",
+        "max_best_abs_correlation",
+        "avg_aligned_direction_hit_rate",
+        "avg_candidate_score",
+        "watchlist_count",
+        "strong_candidate_count",
+    ]
+    if ranked.empty:
+        return pd.DataFrame(columns=columns)
+    grouped = (
+        ranked.groupby(["cme_symbol", "crypto_symbol", "best_horizon", "signal_direction"], dropna=False)
+        .agg(
+            window_count=("candidate_score", "size"),
+            avg_best_abs_correlation=("best_abs_correlation", "mean"),
+            max_best_abs_correlation=("best_abs_correlation", "max"),
+            avg_aligned_direction_hit_rate=("aligned_direction_hit_rate", "mean"),
+            avg_candidate_score=("candidate_score", "mean"),
+            watchlist_count=("candidate_tier", lambda values: int((values == "watchlist").sum())),
+            strong_candidate_count=("candidate_tier", lambda values: int((values == "strong_candidate").sum())),
+        )
+        .reset_index()
+    )
+    grouped = grouped.sort_values(
+        ["strong_candidate_count", "watchlist_count", "avg_candidate_score"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
+    return grouped[columns]
+
+
+def _empty_pair_summary_frame() -> pd.DataFrame:
+    return _pair_summary(pd.DataFrame())
+
+
 def _research_notes(
     *,
     source: pd.DataFrame,
     ranked: pd.DataFrame,
     summary_path: Path,
     ranked_path: Path,
+    min_sample_count: int,
     min_cme_nonzero_return_count: int,
 ) -> str:
     lines = [
@@ -228,7 +323,7 @@ def _research_notes(
         "Candidate score = 70 * best absolute correlation + "
         "20 * abs(direction hit rate - 0.5) * 2 + "
         "10 * min(cme_nonzero_return_count / 120, 1).",
-        f"Filters: status `ok`, quality_status `ok` or `warning`, sample_count >= {MIN_SAMPLE_COUNT}, "
+        f"Filters: status `ok`, quality_status `ok` or `warning`, sample_count >= {min_sample_count}, "
         f"cme_nonzero_return_count >= {min_cme_nonzero_return_count}.",
         "",
         "## Top 10 Candidate Windows",
@@ -236,12 +331,21 @@ def _research_notes(
     ]
     lines.extend(_markdown_table(_top_candidate_rows(ranked)))
     lines.extend(["", "## Weak Or No-Signal Windows", ""])
-    lines.extend(_markdown_table(_weak_rows(source, min_cme_nonzero_return_count=min_cme_nonzero_return_count)))
+    lines.extend(
+        _markdown_table(
+            _weak_rows(
+                source,
+                min_sample_count=min_sample_count,
+                min_cme_nonzero_return_count=min_cme_nonzero_return_count,
+            )
+        )
+    )
     lines.extend(["", "## Insufficient Data Warnings", ""])
     lines.extend(
         _markdown_table(
             _insufficient_rows(
                 source,
+                min_sample_count=min_sample_count,
                 min_cme_nonzero_return_count=min_cme_nonzero_return_count,
             )
         )
@@ -251,7 +355,11 @@ def _research_notes(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _missing_summary_notes(summary_path: Path, min_cme_nonzero_return_count: int) -> str:
+def _missing_summary_notes(
+    summary_path: Path,
+    min_sample_count: int,
+    min_cme_nonzero_return_count: int,
+) -> str:
     return "\n".join(
         [
             "# M3H Event Study Result Analysis",
@@ -263,6 +371,7 @@ def _missing_summary_notes(summary_path: Path, min_cme_nonzero_return_count: int
             "## Insufficient Data Warnings",
             "",
             f"- Missing M3G aggregate summary. Run M3G first, then rerun M3H with "
+            f"`--min-sample-count {min_sample_count}` and "
             f"`--min-cme-nonzero-return-count {min_cme_nonzero_return_count}` if needed.",
         ]
     ) + "\n"
@@ -274,8 +383,17 @@ def _top_candidate_rows(ranked: pd.DataFrame) -> pd.DataFrame:
     return ranked.head(10)[_note_columns(ranked)]
 
 
-def _weak_rows(source: pd.DataFrame, *, min_cme_nonzero_return_count: int) -> pd.DataFrame:
-    eligible = _eligible_rows(source, min_cme_nonzero_return_count=min_cme_nonzero_return_count)
+def _weak_rows(
+    source: pd.DataFrame,
+    *,
+    min_sample_count: int,
+    min_cme_nonzero_return_count: int,
+) -> pd.DataFrame:
+    eligible = _eligible_rows(
+        source,
+        min_sample_count=min_sample_count,
+        min_cme_nonzero_return_count=min_cme_nonzero_return_count,
+    )
     if eligible.empty:
         return pd.DataFrame()
     ranked = _add_ranking_columns(eligible)
@@ -283,7 +401,12 @@ def _weak_rows(source: pd.DataFrame, *, min_cme_nonzero_return_count: int) -> pd
     return weak.sort_values("best_abs_correlation", ascending=True).head(10)[_note_columns(weak)]
 
 
-def _insufficient_rows(source: pd.DataFrame, *, min_cme_nonzero_return_count: int) -> pd.DataFrame:
+def _insufficient_rows(
+    source: pd.DataFrame,
+    *,
+    min_sample_count: int,
+    min_cme_nonzero_return_count: int,
+) -> pd.DataFrame:
     if source.empty:
         return pd.DataFrame()
     required = {"status", "quality_status", "sample_count", "cme_nonzero_return_count"}
@@ -295,10 +418,14 @@ def _insufficient_rows(source: pd.DataFrame, *, min_cme_nonzero_return_count: in
                     "row_count": len(source),
                 }
             ]
-        )
+    )
     rows = source.copy()
     rows["warning_reason"] = rows.apply(
-        lambda row: _warning_reason(row, min_cme_nonzero_return_count=min_cme_nonzero_return_count),
+        lambda row: _warning_reason(
+            row,
+            min_sample_count=min_sample_count,
+            min_cme_nonzero_return_count=min_cme_nonzero_return_count,
+        ),
         axis=1,
     )
     rows = rows[rows["warning_reason"] != ""]
@@ -318,14 +445,19 @@ def _insufficient_rows(source: pd.DataFrame, *, min_cme_nonzero_return_count: in
     return rows[columns].head(15)
 
 
-def _warning_reason(row: pd.Series, *, min_cme_nonzero_return_count: int) -> str:
+def _warning_reason(
+    row: pd.Series,
+    *,
+    min_sample_count: int = MIN_SAMPLE_COUNT,
+    min_cme_nonzero_return_count: int,
+) -> str:
     reasons = []
     if str(row.get("status", "")).lower() != "ok":
         reasons.append("status not ok")
     if str(row.get("quality_status", "")).lower() not in {"ok", "warning"}:
         reasons.append("quality status filtered")
-    if _numeric_value(row.get("sample_count", 0)) < MIN_SAMPLE_COUNT:
-        reasons.append("sample_count below 60")
+    if _numeric_value(row.get("sample_count", 0)) < min_sample_count:
+        reasons.append(f"sample_count below {min_sample_count}")
     if _numeric_value(row.get("cme_nonzero_return_count", 0)) < min_cme_nonzero_return_count:
         reasons.append("too few nonzero CME returns")
     return "; ".join(reasons)
@@ -362,7 +494,10 @@ def _note_columns(frame: pd.DataFrame) -> list[str]:
         "best_horizon",
         "best_abs_correlation",
         "best_direction_hit_rate",
+        "directional_edge",
+        "aligned_direction_hit_rate",
         "signal_direction",
+        "candidate_tier",
         "candidate_score",
     ]
     return [column for column in wanted if column in frame.columns]
