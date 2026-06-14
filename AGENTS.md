@@ -1,6 +1,6 @@
 # Project Instructions
 
-- Use `..venv\Scripts\python.exe`; never use `..\venv\Scripts\python.exe`.
+- Always use `..venv\Scripts\python.exe`; never use `..\venv\Scripts\python.exe`.
 - Run tests with `..venv\Scripts\python.exe -m pytest`.
 - The local data root is `E:\QuantData\yield-lag`.
 - Never commit `.env`, CSV data files, SQL backups, API keys, or other secrets.
