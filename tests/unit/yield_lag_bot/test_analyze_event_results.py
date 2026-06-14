@@ -258,6 +258,113 @@ def test_analyzer_score_is_lower_for_direction_inconsistent_rows(tmp_path) -> No
     assert scores["positive_inconsistent"] < scores["inverse_consistent"]
 
 
+def test_analyzer_date_summary_counts_multiple_dates(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    date_summary_path = tmp_path / "date_summary.csv"
+    pd.DataFrame(
+        [
+            _strong_inverse_row("date_a", "2026-06-10T12:15:00Z"),
+            _strong_inverse_row("date_b", "2026-06-11T12:15:00Z"),
+        ]
+    ).to_csv(summary_path, index=False)
+
+    analyze_event_results(
+        summary=summary_path,
+        out=ranked_path,
+        markdown=notes_path,
+        date_summary_out=date_summary_path,
+    )
+
+    date_summary = pd.read_csv(date_summary_path)
+    row = date_summary.iloc[0]
+    assert row["date_count"] == 2
+    assert row["window_count"] == 2
+
+
+def test_analyzer_date_summary_same_date_windows_count_as_one_date(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    date_summary_path = tmp_path / "date_summary.csv"
+    pd.DataFrame(
+        [
+            _strong_inverse_row("date_a_1", "2026-06-10T12:15:00Z"),
+            _strong_inverse_row("date_a_2", "2026-06-10T13:15:00Z"),
+            _strong_inverse_row("date_a_3", "2026-06-10T14:15:00Z"),
+        ]
+    ).to_csv(summary_path, index=False)
+
+    analyze_event_results(
+        summary=summary_path,
+        out=ranked_path,
+        markdown=notes_path,
+        date_summary_out=date_summary_path,
+    )
+
+    date_summary = pd.read_csv(date_summary_path)
+    row = date_summary.iloc[0]
+    assert row["date_count"] == 1
+    assert row["window_count"] == 3
+
+
+def test_analyzer_date_summary_not_robust_for_one_date_only(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    date_summary_path = tmp_path / "date_summary.csv"
+    pd.DataFrame(
+        [
+            _strong_inverse_row("date_a_1", "2026-06-10T12:15:00Z"),
+            _strong_inverse_row("date_a_2", "2026-06-10T13:15:00Z"),
+            _strong_inverse_row("date_a_3", "2026-06-10T14:15:00Z"),
+        ]
+    ).to_csv(summary_path, index=False)
+
+    analyze_event_results(
+        summary=summary_path,
+        out=ranked_path,
+        markdown=notes_path,
+        date_summary_out=date_summary_path,
+    )
+
+    date_summary = pd.read_csv(date_summary_path)
+    row = date_summary.iloc[0]
+    assert row["date_count"] == 1
+    assert row["robust_across_dates"] == False
+
+
+def test_analyzer_date_summary_robust_for_multiple_dates_meeting_thresholds(tmp_path) -> None:
+    summary_path = tmp_path / "summary.csv"
+    ranked_path = tmp_path / "ranked_summary.csv"
+    notes_path = tmp_path / "research_notes.md"
+    date_summary_path = tmp_path / "date_summary.csv"
+    pd.DataFrame(
+        [
+            _strong_inverse_row("date_a_1", "2026-06-10T12:15:00Z"),
+            _strong_inverse_row("date_a_2", "2026-06-10T13:15:00Z"),
+            _strong_inverse_row("date_b_1", "2026-06-11T12:15:00Z"),
+        ]
+    ).to_csv(summary_path, index=False)
+
+    analyze_event_results(
+        summary=summary_path,
+        out=ranked_path,
+        markdown=notes_path,
+        date_summary_out=date_summary_path,
+    )
+
+    date_summary = pd.read_csv(date_summary_path)
+    row = date_summary.iloc[0]
+    assert row["date_count"] == 2
+    assert row["window_count"] == 3
+    assert row["avg_best_abs_correlation"] == 0.30
+    assert round(row["avg_aligned_direction_hit_rate"], 2) == 0.70
+    assert row["strong_candidate_count"] == 3
+    assert row["robust_across_dates"] == True
+
+
 def _write_summary(path) -> None:
     rows = [
         _row(
@@ -309,6 +416,20 @@ def _write_summary(path) -> None:
         ),
     ]
     pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def _strong_inverse_row(event_name: str, event_time_utc: str) -> dict[str, object]:
+    return _row(
+        event_name=event_name,
+        event_time_utc=event_time_utc,
+        cme_symbol="ZNU6",
+        crypto_symbol="ETH",
+        correlation_1m=-0.30,
+        correlation_3m=-0.10,
+        correlation_5m=-0.05,
+        direction_hit_rate_1m=0.30,
+        cme_nonzero_return_count=30,
+    )
 
 
 def _row(

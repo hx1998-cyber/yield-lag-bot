@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--markdown", required=True)
     parser.add_argument("--min-sample-count", type=int, default=MIN_SAMPLE_COUNT)
     parser.add_argument("--pair-summary-out", default=None)
+    parser.add_argument("--date-summary-out", default=None)
     parser.add_argument(
         "--min-cme-nonzero-return-count",
         type=int,
@@ -48,6 +49,7 @@ def main() -> None:
         out=args.out,
         markdown=args.markdown,
         pair_summary_out=args.pair_summary_out,
+        date_summary_out=args.date_summary_out,
         min_sample_count=args.min_sample_count,
         min_cme_nonzero_return_count=args.min_cme_nonzero_return_count,
     )
@@ -59,6 +61,7 @@ def analyze_event_results(
     out: str | Path,
     markdown: str | Path,
     pair_summary_out: str | Path | None = None,
+    date_summary_out: str | Path | None = None,
     min_sample_count: int = MIN_SAMPLE_COUNT,
     min_cme_nonzero_return_count: int = DEFAULT_MIN_CME_NONZERO_RETURN_COUNT,
 ) -> pd.DataFrame:
@@ -70,12 +73,17 @@ def analyze_event_results(
     pair_summary_path = Path(pair_summary_out) if pair_summary_out is not None else None
     if pair_summary_path is not None:
         pair_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    date_summary_path = Path(date_summary_out) if date_summary_out is not None else None
+    if date_summary_path is not None:
+        date_summary_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not summary_path.exists():
         ranked = _empty_ranked_frame()
         ranked.to_csv(out_path, index=False)
         if pair_summary_path is not None:
             _empty_pair_summary_frame().to_csv(pair_summary_path, index=False)
+        if date_summary_path is not None:
+            _empty_date_summary_frame().to_csv(date_summary_path, index=False)
         markdown_path.write_text(
             _missing_summary_notes(summary_path, min_sample_count, min_cme_nonzero_return_count),
             encoding="utf-8",
@@ -92,6 +100,8 @@ def analyze_event_results(
     ranked.to_csv(out_path, index=False)
     if pair_summary_path is not None:
         _pair_summary(ranked).to_csv(pair_summary_path, index=False)
+    if date_summary_path is not None:
+        _date_summary(ranked).to_csv(date_summary_path, index=False)
     markdown_path.write_text(
         _research_notes(
             source=source,
@@ -314,6 +324,65 @@ def _pair_summary(ranked: pd.DataFrame) -> pd.DataFrame:
 
 def _empty_pair_summary_frame() -> pd.DataFrame:
     return _pair_summary(pd.DataFrame())
+
+
+def _date_summary(ranked: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "cme_symbol",
+        "crypto_symbol",
+        "best_horizon",
+        "signal_direction",
+        "date_count",
+        "window_count",
+        "avg_best_abs_correlation",
+        "max_best_abs_correlation",
+        "avg_aligned_direction_hit_rate",
+        "avg_candidate_score",
+        "watchlist_count",
+        "strong_candidate_count",
+        "robust_across_dates",
+    ]
+    if ranked.empty:
+        return pd.DataFrame(columns=columns)
+    with_dates = ranked.copy()
+    if "event_time_utc" not in with_dates.columns:
+        return pd.DataFrame(columns=columns)
+    event_times = pd.to_datetime(with_dates["event_time_utc"], errors="coerce", utc=True)
+    with_dates["event_date_utc"] = event_times.dt.date.astype("string")
+    with_dates = with_dates[with_dates["event_date_utc"].notna()]
+    if with_dates.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped = (
+        with_dates.groupby(["cme_symbol", "crypto_symbol", "best_horizon", "signal_direction"], dropna=False)
+        .agg(
+            date_count=("event_date_utc", "nunique"),
+            window_count=("candidate_score", "size"),
+            avg_best_abs_correlation=("best_abs_correlation", "mean"),
+            max_best_abs_correlation=("best_abs_correlation", "max"),
+            avg_aligned_direction_hit_rate=("aligned_direction_hit_rate", "mean"),
+            avg_candidate_score=("candidate_score", "mean"),
+            watchlist_count=("candidate_tier", lambda values: int((values == "watchlist").sum())),
+            strong_candidate_count=("candidate_tier", lambda values: int((values == "strong_candidate").sum())),
+        )
+        .reset_index()
+    )
+    grouped["robust_across_dates"] = (
+        (grouped["date_count"] >= 2)
+        & (grouped["window_count"] >= 3)
+        & (grouped["avg_best_abs_correlation"] >= 0.25)
+        & (grouped["avg_aligned_direction_hit_rate"] >= 0.60)
+        & (grouped["strong_candidate_count"] >= 2)
+    )
+    grouped = grouped.sort_values(
+        ["robust_across_dates", "date_count", "strong_candidate_count", "avg_candidate_score"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
+    return grouped[columns]
+
+
+def _empty_date_summary_frame() -> pd.DataFrame:
+    return _date_summary(pd.DataFrame())
 
 
 def _research_notes(
